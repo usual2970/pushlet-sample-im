@@ -3,6 +3,7 @@ package chat
 import (
 	"bufio"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"html/template"
@@ -11,8 +12,11 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 
 	"github.com/usual2970/pushlet"
 
@@ -34,17 +38,65 @@ type failingPublisher struct{ err error }
 
 func (f failingPublisher) PublishJSON(string, string, any) error { return f.err }
 
+// recordedPublish is one PublishJSON call captured by recordingPublisher.
+type recordedPublish struct {
+	topic string
+	event string
+}
+
+// recordingPublisher accepts every publish and records it; the
+// store-failure test injects it to prove the 500 path never broadcasts.
+type recordingPublisher struct {
+	mu    sync.Mutex
+	calls []recordedPublish
+}
+
+// PublishJSON records the call and answers success.
+func (r *recordingPublisher) PublishJSON(topic, event string, _ any) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, recordedPublish{topic: topic, event: event})
+	return nil
+}
+
+// wedgeMessageInserts wedges the messages table against writes on the
+// fixture's application database: through a second SQLite connection — the
+// store's own handle offers no fault seam, and its PostMessage handler sits
+// behind session middleware that reads the same store, so simply closing it
+// would fail the session lookup first — it installs a trigger that aborts
+// every INSERT into messages while leaving reads alone. That is the write
+// half of a store fault with the read half intact: the middleware keeps
+// resolving sessions, and the handler's save still fails, the way a full
+// disk or a locked database would fail it in production.
+func wedgeMessageInserts(t *testing.T, dbPath string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=busy_timeout(10000)")
+	if err != nil {
+		t.Fatalf("open wedge handle: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(`CREATE TRIGGER fail_message_insert
+BEFORE INSERT ON messages
+BEGIN
+	SELECT RAISE(ABORT, 'messages table is wedged');
+END;`); err != nil {
+		t.Fatalf("wedge messages inserts: %v", err)
+	}
+}
+
 // fixture wires a store, the auth service, the chat service, and a real
 // local-mode pushlet the way main.go does, over a fresh SQLite file. pub
 // overrides the pushlet for the publish-failure test; nil uses the pushlet.
 type fixture struct {
-	store *store.Store
-	ts    *httptest.Server
+	store  *store.Store
+	dbPath string
+	ts     *httptest.Server
 }
 
 func newFixture(t *testing.T, pub Publisher) *fixture {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "app.db"))
+	dbPath := filepath.Join(t.TempDir(), "app.db")
+	st, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -70,7 +122,7 @@ func newFixture(t *testing.T, pub Publisher) *fixture {
 	mux.Handle("GET /api/messages", authSvc.RequireAuth(http.HandlerFunc(chatSvc.HandleListMessages)))
 	mux.Handle("/chat", authSvc.RequireAuth(http.HandlerFunc(chatSvc.HandleChatPage)))
 
-	fx := &fixture{store: st, ts: httptest.NewServer(mux)}
+	fx := &fixture{store: st, dbPath: dbPath, ts: httptest.NewServer(mux)}
 	t.Cleanup(fx.ts.Close)
 	return fx
 }
@@ -608,6 +660,39 @@ func TestPublishFailureReturns502AndKeepsRow(t *testing.T) {
 	_, messages := history(t, fx.ts, token, "")
 	if len(messages) != 1 || messages[0].Body != "persisted but not broadcast" {
 		t.Fatalf("history %+v, want the persisted-but-unpublished row", messages)
+	}
+}
+
+// TestPostMessageStoreFailureReturns500 pins the save-failure branch: with
+// the messages table wedged against INSERTs (reads intact, so the session
+// middleware still resolves and the handler branch itself runs), a valid post
+// answers 500 with the JSON error envelope — never a panic, which would
+// surface here as a transport error when net/http drops the connection —
+// publishes nothing, and half-writes no row the history read can see.
+func TestPostMessageStoreFailureReturns500(t *testing.T) {
+	pub := &recordingPublisher{}
+	fx := newFixture(t, pub)
+	_, token := session(t, fx, "wedge")
+	wedgeMessageInserts(t, fx.dbPath)
+
+	status, msg, errMsg := postMessage(t, fx.ts, token, "should not land")
+	if status != http.StatusInternalServerError {
+		t.Fatalf("post status %d (error %q), want 500", status, errMsg)
+	}
+	if !strings.Contains(errMsg, "could not save the message") {
+		t.Fatalf("error %q, want the save-failure message", errMsg)
+	}
+	if msg.ID != 0 {
+		t.Fatalf("reply %+v carries a message the store never saved", msg)
+	}
+	if got := len(pub.calls); got != 0 {
+		t.Fatalf("the save-failure path published %d events (%+v), want none", got, pub.calls)
+	}
+
+	// Reads still work; the failed save must not have half-written a row.
+	_, messages := history(t, fx.ts, token, "")
+	if len(messages) != 0 {
+		t.Fatalf("history %+v, want no rows from the failed save", messages)
 	}
 }
 

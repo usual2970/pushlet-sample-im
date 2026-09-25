@@ -230,6 +230,196 @@ func TestAuthRoutesMountedThroughApp(t *testing.T) {
 	}
 }
 
+// TestLoginPageLoginUserAndPresenceLeaveMountedThroughApp covers the routes
+// the other end-to-end tests skip, all through main.go's real mount table:
+// the /login page (anonymous visitors see both forms, signed-in ones are sent
+// straight to /chat), POST /api/login (right credentials 200 plus a fresh
+// cookie, wrong ones a 401 in the JSON envelope), GET /api/users/{id} (the
+// public name for a known id, 404 for anyone else), the sendBeacon-shaped
+// POST /api/presence/leave, and POST /api/logout (the cookie cleared, the old
+// session rejected afterwards).
+func TestLoginPageLoginUserAndPresenceLeaveMountedThroughApp(t *testing.T) {
+	_, ts := newTestApp(t)
+	noRedirect := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+
+	// Anonymous /login renders both the sign-in and the registration form.
+	anon, err := noRedirect.Get(ts.URL + "/login")
+	if err != nil {
+		t.Fatalf("get /login anonymously: %v", err)
+	}
+	defer anon.Body.Close()
+	if anon.StatusCode != http.StatusOK {
+		t.Fatalf("anonymous /login status %d, want 200", anon.StatusCode)
+	}
+	page, err := io.ReadAll(anon.Body)
+	if err != nil {
+		t.Fatalf("read /login page: %v", err)
+	}
+	for _, want := range []string{`id="login-form"`, `id="register-form"`, "/api/login", "/api/register"} {
+		if !strings.Contains(string(page), want) {
+			t.Fatalf("anonymous /login page is missing %q", want)
+		}
+	}
+
+	// A signed-in visitor is sent straight to the room.
+	cookie, id := registerViaAPI(t, ts, "mountie", "pw-mountie")
+	authedReq, err := http.NewRequest(http.MethodGet, ts.URL+"/login", nil)
+	if err != nil {
+		t.Fatalf("new /login request: %v", err)
+	}
+	authedReq.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: cookie})
+	authed, err := noRedirect.Do(authedReq)
+	if err != nil {
+		t.Fatalf("get /login signed in: %v", err)
+	}
+	defer authed.Body.Close()
+	if authed.StatusCode != http.StatusFound {
+		t.Fatalf("signed-in /login status %d, want 302", authed.StatusCode)
+	}
+	if loc := authed.Header.Get("Location"); loc != "/chat" {
+		t.Fatalf("signed-in /login redirects to %q, want /chat", loc)
+	}
+
+	// POST /api/login with the right credentials signs in and sets a cookie.
+	login, err := http.Post(ts.URL+"/api/login", "application/json",
+		strings.NewReader(`{"username":"mountie","password":"pw-mountie"}`))
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	defer login.Body.Close()
+	if login.StatusCode != http.StatusOK {
+		t.Fatalf("login status %d, want 200", login.StatusCode)
+	}
+	var loginBody struct {
+		ID       string `json:"id"`
+		Username string `json:"username"`
+	}
+	if err := json.NewDecoder(login.Body).Decode(&loginBody); err != nil {
+		t.Fatalf("decode login reply: %v", err)
+	}
+	if loginBody.ID != id || loginBody.Username != "mountie" {
+		t.Fatalf("login reply %+v, want the registered account %s", loginBody, id)
+	}
+	freshCookie := ""
+	for _, c := range login.Cookies() {
+		if c.Name == auth.SessionCookieName {
+			freshCookie = c.Value
+		}
+	}
+	if freshCookie == "" {
+		t.Fatal("login set no session cookie")
+	}
+
+	// Wrong credentials answer 401 in the JSON envelope.
+	wrong, err := http.Post(ts.URL+"/api/login", "application/json",
+		strings.NewReader(`{"username":"mountie","password":"not-the-password"}`))
+	if err != nil {
+		t.Fatalf("login with wrong password: %v", err)
+	}
+	defer wrong.Body.Close()
+	if wrong.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("wrong-password login status %d, want 401", wrong.StatusCode)
+	}
+	assertJSONErrorBody(t, wrong)
+
+	// GET /api/users/{id} carries the public name; unknown ids answer 404.
+	userReq, err := http.NewRequest(http.MethodGet, ts.URL+"/api/users/"+id, nil)
+	if err != nil {
+		t.Fatalf("new user lookup: %v", err)
+	}
+	userReq.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: cookie})
+	userResp, err := http.DefaultClient.Do(userReq)
+	if err != nil {
+		t.Fatalf("get /api/users/%s: %v", id, err)
+	}
+	defer userResp.Body.Close()
+	if userResp.StatusCode != http.StatusOK {
+		t.Fatalf("user lookup status %d, want 200", userResp.StatusCode)
+	}
+	var user struct {
+		ID          string `json:"id"`
+		Username    string `json:"username"`
+		DisplayName string `json:"display_name"`
+	}
+	if err := json.NewDecoder(userResp.Body).Decode(&user); err != nil {
+		t.Fatalf("decode user lookup: %v", err)
+	}
+	if user.ID != id || user.Username != "mountie" || user.DisplayName != "mountie" {
+		t.Fatalf("user lookup %+v, want mountie's public info under id %s", user, id)
+	}
+
+	nopeReq, err := http.NewRequest(http.MethodGet, ts.URL+"/api/users/no-such-user", nil)
+	if err != nil {
+		t.Fatalf("new unknown user lookup: %v", err)
+	}
+	nopeReq.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: cookie})
+	nope, err := http.DefaultClient.Do(nopeReq)
+	if err != nil {
+		t.Fatalf("get /api/users/no-such-user: %v", err)
+	}
+	defer nope.Body.Close()
+	if nope.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown user lookup status %d, want 404", nope.StatusCode)
+	}
+	assertJSONErrorBody(t, nope)
+
+	// The sendBeacon-shaped leave (empty body, no Content-Type) answers 200.
+	joinPresence(t, ts, cookie)
+	leave, err := http.NewRequest(http.MethodPost, ts.URL+"/api/presence/leave", nil)
+	if err != nil {
+		t.Fatalf("new leave: %v", err)
+	}
+	leave.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: cookie})
+	leaveResp, err := http.DefaultClient.Do(leave)
+	if err != nil {
+		t.Fatalf("post /api/presence/leave: %v", err)
+	}
+	leaveResp.Body.Close()
+	if leaveResp.StatusCode != http.StatusOK {
+		t.Fatalf("presence leave status %d, want 200", leaveResp.StatusCode)
+	}
+
+	// Logout clears the cookie, and the old session stops working.
+	logout, err := http.NewRequest(http.MethodPost, ts.URL+"/api/logout", nil)
+	if err != nil {
+		t.Fatalf("new logout: %v", err)
+	}
+	logout.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: cookie})
+	logoutResp, err := http.DefaultClient.Do(logout)
+	if err != nil {
+		t.Fatalf("post /api/logout: %v", err)
+	}
+	defer logoutResp.Body.Close()
+	if logoutResp.StatusCode != http.StatusOK {
+		t.Fatalf("logout status %d, want 200", logoutResp.StatusCode)
+	}
+	cleared := false
+	for _, c := range logoutResp.Cookies() {
+		if c.Name == auth.SessionCookieName && c.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Fatal("logout did not clear the session cookie")
+	}
+
+	meReq, err := http.NewRequest(http.MethodGet, ts.URL+"/api/me", nil)
+	if err != nil {
+		t.Fatalf("new /api/me request: %v", err)
+	}
+	meReq.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: cookie})
+	me, err := http.DefaultClient.Do(meReq)
+	if err != nil {
+		t.Fatalf("get /api/me with the logged-out cookie: %v", err)
+	}
+	defer me.Body.Close()
+	if me.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("/api/me with the logged-out cookie: status %d, want 401", me.StatusCode)
+	}
+}
+
 func TestSSEStreamSendsConnectedEvent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

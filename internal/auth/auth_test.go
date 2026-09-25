@@ -481,6 +481,56 @@ func TestSessionStoreFailureIsNotLogout(t *testing.T) {
 	}
 }
 
+// TestRegisterStoreFailureReturns500 breaks the store under the register
+// endpoint (a closed database fails every lookup and write, the way a real
+// store fault does — the same trick TestSessionStoreFailureIsNotLogout uses):
+// registration must answer 500 with the JSON error envelope, never a panic
+// (which would surface here as a transport error when net/http drops the
+// connection) and never a half-registration — no session cookie may be set
+// when the account could not be created.
+func TestRegisterStoreFailureReturns500(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "app.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	tpl, err := template.ParseFiles(loginTemplatePath)
+	if err != nil {
+		t.Fatalf("parse login template: %v", err)
+	}
+	fx := newFixture(t, st, tpl)
+	ts := httptest.NewServer(fx.mux)
+	t.Cleanup(ts.Close)
+
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	resp, err := http.Post(ts.URL+"/api/register", "application/json",
+		strings.NewReader(`{"username":"wedge","password":"pw"}`))
+	if err != nil {
+		t.Fatalf("register over a broken store: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("register status %d, want 500", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Fatalf("register content type %q, want JSON", ct)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if !strings.Contains(body["error"], "could not create the account") {
+		t.Fatalf("error %q, want the account-creation failure message", body["error"])
+	}
+	for _, c := range resp.Cookies() {
+		if c.Name == SessionCookieName {
+			t.Fatal("register over a broken store set a session cookie; the account was never created")
+		}
+	}
+}
+
 // TestLoginPageServesBothForms checks the combined page (R13): /login
 // answers 200 with the login and registration forms, and sends signed-in
 // visitors to /chat instead.
