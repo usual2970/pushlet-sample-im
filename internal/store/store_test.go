@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -337,6 +338,65 @@ func TestMessagesTableReadyForChat(t *testing.T) {
 	if idx != 1 {
 		t.Fatal("idx_messages_scope_id is missing")
 	}
+}
+
+// TestAppendAndRecentMessages covers the message persistence U3 builds on:
+// append assigns increasing ids, and recent queries filter by after-id, cap
+// at the most recent rows, order oldest-first, and stay inside their scope.
+func TestAppendAndRecentMessages(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	for i := 1; i <= 3; i++ {
+		msg, err := st.AppendMessage(ctx, "room", "u1", "alice", fmt.Sprintf("m%d", i), int64(1000+i))
+		if err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+		if msg.ID != int64(i) {
+			t.Fatalf("append %d assigned id %d", i, msg.ID)
+		}
+	}
+
+	recent, err := st.RecentMessages(ctx, "room", 0, 50)
+	if err != nil {
+		t.Fatalf("recent: %v", err)
+	}
+	if len(recent) != 3 || recent[0].ID != 1 || recent[2].ID != 3 {
+		t.Fatalf("recent ids %v, want 1..3 oldest-first", messageIDs(recent))
+	}
+
+	after, err := st.RecentMessages(ctx, "room", 1, 50)
+	if err != nil {
+		t.Fatalf("recent after 1: %v", err)
+	}
+	if len(after) != 2 || after[0].ID != 2 || after[1].ID != 3 {
+		t.Fatalf("after=1 ids %v, want 2,3", messageIDs(after))
+	}
+
+	capped, err := st.RecentMessages(ctx, "room", 0, 2)
+	if err != nil {
+		t.Fatalf("recent capped: %v", err)
+	}
+	if len(capped) != 2 || capped[0].ID != 2 || capped[1].ID != 3 {
+		t.Fatalf("capped ids %v, want the most recent two 2,3", messageIDs(capped))
+	}
+
+	other, err := st.RecentMessages(ctx, "dm:u1/u2", 0, 50)
+	if err != nil {
+		t.Fatalf("recent other scope: %v", err)
+	}
+	if len(other) != 0 {
+		t.Fatalf("other scope returned %d messages, want scope isolation", len(other))
+	}
+}
+
+// messageIDs extracts the id column for failure messages.
+func messageIDs(messages []Message) []int64 {
+	ids := make([]int64, len(messages))
+	for i, m := range messages {
+		ids[i] = m.ID
+	}
+	return ids
 }
 
 // TestOpenIsIdempotent re-opens an already-migrated database file.

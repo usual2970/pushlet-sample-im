@@ -1,0 +1,177 @@
+/* sample-im styles. One stylesheet serves both pages: shared element styles
+   below, the login card scoped under body.login, the room layout under
+   body.chat. Light palette first, dark-mode overrides at the end. */
+
+:root { color-scheme: light dark; }
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: #f4f5f7;
+  color: #1d1d1f;
+}
+
+input,
+textarea {
+  display: block;
+  font: inherit;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid #c6c9cf;
+  border-radius: 6px;
+}
+
+button {
+  padding: 0.55rem 0.9rem;
+  font: inherit;
+  font-weight: 600;
+  color: #ffffff;
+  background: #2f6fed;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+button:hover { background: #265fd0; }
+
+/* ---- login page ---- */
+
+body.login {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+body.login main {
+  width: 20rem;
+  padding: 1.75rem;
+  background: #ffffff;
+  border: 1px solid #e2e4e8;
+  border-radius: 10px;
+}
+body.login h1 { margin: 0 0 1.25rem; font-size: 1.4rem; }
+body.login h2 { margin: 0 0 1rem; font-size: 1.05rem; font-weight: 600; }
+body.login label { display: block; margin-bottom: 0.75rem; font-size: 0.85rem; }
+body.login input { width: 100%; margin-top: 0.25rem; }
+body.login button { width: 100%; }
+body.login #error {
+  margin-bottom: 1rem;
+  padding: 0.5rem 0.6rem;
+  font-size: 0.85rem;
+  color: #a4161a;
+  background: #fbeaea;
+  border: 1px solid #efc7c7;
+  border-radius: 6px;
+}
+body.login .switch { margin: 1rem 0 0; font-size: 0.85rem; text-align: center; }
+body.login form:not(.active) { display: none; }
+
+/* ---- chat page ---- */
+
+body.chat {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+#conn-banner {
+  padding: 0.35rem 1rem;
+  font-size: 0.85rem;
+  text-align: center;
+  color: #7a5300;
+  background: #ffe9b3;
+  border-bottom: 1px solid #e8cf8e;
+}
+
+.chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.6rem 1rem;
+  background: #ffffff;
+  border-bottom: 1px solid #e2e4e8;
+}
+.chat-header h1 { margin: 0; font-size: 1.1rem; }
+.room-name { font-weight: 400; color: #5b6068; }
+.user-box { display: flex; align-items: center; gap: 0.75rem; }
+#me { font-weight: 600; }
+
+.chat-layout {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.chat-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+#messages {
+  flex: 1;
+  margin: 0;
+  padding: 1rem;
+  overflow-y: auto;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.msg .meta { display: block; font-size: 0.78rem; color: #5b6068; }
+.msg .author { font-weight: 600; }
+.msg .body {
+  display: block;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.empty { color: #5b6068; }
+
+.composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border-top: 1px solid #e2e4e8;
+  background: #ffffff;
+}
+.composer textarea { flex: 1; resize: vertical; }
+.composer-error {
+  padding: 0 0.75rem 0.5rem;
+  font-size: 0.85rem;
+  color: #a4161a;
+}
+
+.online {
+  width: 15rem;
+  padding: 1rem;
+  background: #ffffff;
+  border-left: 1px solid #e2e4e8;
+}
+.online h2 {
+  margin: 0 0 0.75rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #5b6068;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.online ul { margin: 0; padding: 0; list-style: none; }
+
+/* ---- dark mode ---- */
+
+@media (prefers-color-scheme: dark) {
+  body { background: #16181d; color: #e8eaed; }
+
+  body.login main { background: #1f2229; border-color: #33363e; }
+  input, textarea { background: #16181d; color: #e8eaed; border-color: #3f434c; }
+  body.login #error { background: #3a2020; border-color: #5c2b2b; }
+
+  #conn-banner { color: #ffd98a; background: #3a2f14; border-color: #5c4a1c; }
+  .chat-header, .composer, .online { background: #1f2229; border-color: #33363e; }
+  .room-name, .msg .meta, .empty { color: #9aa1ab; }
+  .composer-error { color: #ff8f94; }
+}

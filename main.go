@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"io/fs"
 	"log"
 	"maps"
 	"net/http"
@@ -30,6 +31,7 @@ import (
 	"github.com/usual2970/pushlet"
 
 	"github.com/usual2970/sample-im/internal/auth"
+	"github.com/usual2970/sample-im/internal/chat"
 	"github.com/usual2970/sample-im/internal/store"
 )
 
@@ -45,8 +47,14 @@ const (
 // templateFS embeds the server-rendered pages so the single binary serves
 // them no matter where it runs from.
 //
-//go:embed web/templates/login.html
+//go:embed web/templates/*.html
 var templateFS embed.FS
+
+// staticFS embeds the client assets (stylesheet, room script) served under
+// /static/.
+//
+//go:embed web/static
+var staticFS embed.FS
 
 // Config controls one sample-im process. Zero-valued fields fall back to the
 // package defaults above; tests override the database path and relay poll
@@ -95,6 +103,7 @@ type App struct {
 	db       *sql.DB
 	appStore *store.Store
 	authSrv  *auth.Service
+	chatSrv  *chat.Service
 	push     *pushlet.Pushlet
 	mux      *http.ServeMux
 	stopOn   sync.Once
@@ -127,10 +136,15 @@ func NewApp(cfg Config) (*App, error) {
 		_ = appStore.Close()
 	}
 
-	tpl, err := template.ParseFS(templateFS, "web/templates/login.html")
+	tpl, err := template.ParseFS(templateFS, "web/templates/*.html")
 	if err != nil {
 		closeDBs()
 		return nil, fmt.Errorf("parse templates: %w", err)
+	}
+	staticRoot, err := fs.Sub(staticFS, "web/static")
+	if err != nil {
+		closeDBs()
+		return nil, fmt.Errorf("static assets: %w", err)
 	}
 
 	app := &App{cfg: cfg, db: db, appStore: appStore, authSrv: auth.NewService(appStore, tpl)}
@@ -150,15 +164,17 @@ func NewApp(cfg Config) (*App, error) {
 		closeDBs()
 		return nil, fmt.Errorf("distributed mode: %w", err)
 	}
+	app.chatSrv = chat.NewService(appStore, app.push, tpl)
 
 	app.mux = http.NewServeMux()
-	app.mountRoutes()
+	app.mountRoutes(staticRoot)
 	return app, nil
 }
 
 // mountRoutes wires the HTTP surface. Keep this in one place so later units
-// (chat, presence, DMs) extend the service by mounting more handlers here.
-func (a *App) mountRoutes() {
+// (presence, DMs) extend the service by mounting more handlers here.
+// staticRoot is the embedded client-asset tree served under /static/.
+func (a *App) mountRoutes(staticRoot fs.FS) {
 	a.mux.HandleFunc("/health", handleHealth)
 	a.mux.HandleFunc("/events", a.push.HandleSSE)
 	a.mux.HandleFunc("/ws", a.push.HandleWebsocket)
@@ -167,8 +183,22 @@ func (a *App) mountRoutes() {
 	a.mux.Handle("/api/logout", a.authSrv.RequireAuth(http.HandlerFunc(a.authSrv.HandleLogout)))
 	a.mux.Handle("/api/me", a.authSrv.RequireAuth(http.HandlerFunc(a.authSrv.HandleMe)))
 	a.mux.HandleFunc("/login", a.authSrv.HandleLoginPage)
-	a.mux.Handle("/chat", a.authSrv.RequireAuth(http.HandlerFunc(handleChat)))
+	a.mux.Handle("/chat", a.authSrv.RequireAuth(http.HandlerFunc(a.chatSrv.HandleChatPage)))
+	a.mux.Handle("POST /api/messages", a.authSrv.RequireAuth(http.HandlerFunc(a.chatSrv.HandlePostMessage)))
+	a.mux.Handle("GET /api/messages", a.authSrv.RequireAuth(http.HandlerFunc(a.chatSrv.HandleListMessages)))
+	a.mux.Handle("GET /static/", http.StripPrefix("/static/", staticHandler(staticRoot)))
 	a.mux.HandleFunc("/", handleIndex)
+}
+
+// staticHandler serves the embedded client assets. Responses carry
+// Cache-Control: no-cache so demo deployments pick up asset changes on
+// refresh instead of serving a stale script.
+func staticHandler(root fs.FS) http.Handler {
+	fileServer := http.FileServerFS(root)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache")
+		fileServer.ServeHTTP(w, r)
+	})
 }
 
 // Start runs the pushlet broker and the relay fan-out goroutines. It must be
@@ -230,18 +260,14 @@ func handleIndex(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintln(w, "  GET /events?topic=t   SSE stream for topic t")
 	fmt.Fprintln(w, "  GET /ws?topic=t       WebSocket stream for topic t")
 	fmt.Fprintln(w, "  GET /login            sign in or create an account")
+	fmt.Fprintln(w, "  GET /chat             the chat room page (session required)")
 	fmt.Fprintln(w, "  POST /api/register    create an account (JSON)")
 	fmt.Fprintln(w, "  POST /api/login       sign in (JSON)")
 	fmt.Fprintln(w, "  POST /api/logout      sign out")
 	fmt.Fprintln(w, "  GET /api/me           the signed-in user (JSON)")
-}
-
-// handleChat is the placeholder for the chat room page (U3). It sits behind
-// the auth middleware, so anonymous visitors are redirected to /login first.
-func handleChat(w http.ResponseWriter, r *http.Request) {
-	user, _ := auth.FromContext(r.Context())
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	fmt.Fprintf(w, "hi %s — chat coming in U3\n", user.Username)
+	fmt.Fprintln(w, "  POST /api/messages    send a room message (JSON, session required)")
+	fmt.Fprintln(w, "  GET /api/messages     recent room history (JSON, ?after=id)")
+	fmt.Fprintln(w, "  GET /static/...       embedded client assets")
 }
 
 // dmTopicPrefix marks direct-message topics. Their names identify

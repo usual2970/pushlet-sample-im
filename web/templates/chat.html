@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sample-im — #room</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="chat">
+<div id="conn-banner" role="status" hidden>reconnecting…</div>
+<header class="chat-header">
+  <h1>sample-im <span class="room-name">#room</span></h1>
+  <div class="user-box">
+    <span id="me">{{.Username}}</span>
+    <button id="logout" type="button">Log out</button>
+  </div>
+</header>
+<div class="chat-layout">
+  <main class="chat-main">
+    <ol id="messages" class="messages" aria-live="polite">
+      {{range .Messages}}<li class="msg" data-id="{{.ID}}"><span class="meta"><span class="author">{{.AuthorName}}</span> <time data-created-at="{{.CreatedAt}}"></time></span> <span class="body">{{.Body}}</span></li>
+      {{else}}<li class="empty">No messages yet — say hello.</li>{{end}}
+    </ol>
+    <div id="composer-error" class="composer-error" hidden></div>
+    <form id="composer" class="composer">
+      <textarea id="composer-input" rows="2" autofocus
+                placeholder="Message #room — Enter to send, Shift+Enter for a new line"></textarea>
+      <button id="send" type="submit">Send</button>
+    </form>
+  </main>
+  <aside id="online" class="online" aria-label="Online users">
+    <h2>Online</h2>
+    <!-- U4 (presence) fills this list; U3 only reserves the container. -->
+    <ul id="online-list"></ul>
+  </aside>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

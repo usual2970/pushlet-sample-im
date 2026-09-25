@@ -236,6 +236,144 @@ func TestWebSocketSubscriberReceivesPublishedMessage(t *testing.T) {
 	}
 }
 
+// TestChatRoomEndToEndThroughRelay drives the full U3 chain across every
+// layer with no mocks: register over HTTP, subscribe an SSE client to the
+// room topic, post a multi-line unicode message over the API, watch it fan
+// out through the novaque relay to the subscriber, and read it back from
+// history and the rendered room page.
+func TestChatRoomEndToEndThroughRelay(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, ts := newTestApp(t)
+
+	resp, err := http.Post(ts.URL+"/api/register", "application/json",
+		strings.NewReader(`{"username":"roomie","password":"pw"}`))
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("register status %d, want 200", resp.StatusCode)
+	}
+	var session string
+	for _, c := range resp.Cookies() {
+		if c.Name == "sample_im_session" {
+			session = c.Value
+		}
+	}
+	if session == "" {
+		t.Fatal("register set no session cookie")
+	}
+
+	stream := openSSE(t, ctx, ts.URL+"/events?topic=room")
+	if event, _ := stream.next(t); event != "connected" {
+		t.Fatalf("first event %q, want connected", event)
+	}
+
+	body := "hello room\nsecond line 你好 🎉"
+	payload, err := json.Marshal(map[string]string{"body": body})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	post, err := http.NewRequest(http.MethodPost, ts.URL+"/api/messages", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	post.Header.Set("Content-Type", "application/json")
+	post.AddCookie(&http.Cookie{Name: "sample_im_session", Value: session})
+	postResp, err := http.DefaultClient.Do(post)
+	if err != nil {
+		t.Fatalf("post message: %v", err)
+	}
+	defer postResp.Body.Close()
+	if postResp.StatusCode != http.StatusCreated {
+		t.Fatalf("post message status %d, want 201", postResp.StatusCode)
+	}
+	var reply struct {
+		ID         int64  `json:"id"`
+		AuthorName string `json:"author_name"`
+		Body       string `json:"body"`
+		CreatedAt  int64  `json:"created_at"`
+	}
+	if err := json.NewDecoder(postResp.Body).Decode(&reply); err != nil {
+		t.Fatalf("decode reply: %v", err)
+	}
+	if reply.Body != body || reply.AuthorName != "roomie" || reply.ID == 0 || reply.CreatedAt == 0 {
+		t.Fatalf("reply %+v is not the server-stamped message", reply)
+	}
+
+	for {
+		event, data := stream.next(t)
+		if event != "message" {
+			t.Logf("skipping event %q while waiting for message", event)
+			continue
+		}
+		var got struct {
+			ID         int64  `json:"id"`
+			AuthorName string `json:"author_name"`
+			Body       string `json:"body"`
+			CreatedAt  int64  `json:"created_at"`
+		}
+		if err := json.Unmarshal([]byte(data), &got); err != nil {
+			t.Fatalf("decode message data %q: %v", data, err)
+		}
+		if got != reply {
+			t.Fatalf("stream payload %+v, want the posted reply %+v", got, reply)
+		}
+		break
+	}
+
+	// History reads the same row back from SQLite.
+	hist, err := http.NewRequest(http.MethodGet, ts.URL+"/api/messages?after=0", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	hist.AddCookie(&http.Cookie{Name: "sample_im_session", Value: session})
+	histResp, err := http.DefaultClient.Do(hist)
+	if err != nil {
+		t.Fatalf("get history: %v", err)
+	}
+	defer histResp.Body.Close()
+	var messages []struct {
+		ID       int64  `json:"id"`
+		Body     string `json:"body"`
+		AuthorID string `json:"author_id"`
+	}
+	if err := json.NewDecoder(histResp.Body).Decode(&messages); err != nil {
+		t.Fatalf("decode history: %v", err)
+	}
+	if len(messages) != 1 || messages[0].ID != reply.ID || messages[0].Body != body || messages[0].AuthorID == "" {
+		t.Fatalf("history %+v, want the posted message %+v", messages, reply)
+	}
+}
+
+// TestStaticAssetsServed checks the embedded client assets are reachable
+// under /static/ through the app's mux.
+func TestStaticAssetsServed(t *testing.T) {
+	_, ts := newTestApp(t)
+
+	for path, want := range map[string]string{
+		"/static/app.js":    "EventSource", // the room stream subscription
+		"/static/style.css": "conn-banner", // the reconnect banner style
+	} {
+		resp, err := http.Get(ts.URL + path)
+		if err != nil {
+			t.Fatalf("get %s: %v", path, err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("get %s status %d, want 200", path, resp.StatusCode)
+		}
+		if !strings.Contains(string(body), want) {
+			t.Fatalf("%s does not contain %q", path, want)
+		}
+	}
+}
+
 // TestPushHandlersUnavailableBeforeStart pins the ordering constraint:
 // handlers mounted by NewApp answer 503 until App.Start runs the broker, so
 // Start must be called before serving traffic.

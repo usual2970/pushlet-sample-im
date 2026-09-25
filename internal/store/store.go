@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -206,6 +207,76 @@ func (s *Store) UserByID(ctx context.Context, id string) (*User, error) {
 		return nil, fmt.Errorf("query user by id: %w", err)
 	}
 	return &u, nil
+}
+
+// Message is one stored chat message. Scope names the conversation the
+// message belongs to — the global room ("room", U3) or a direct-message
+// conversation (U5) — and ID is unique across the table.
+type Message struct {
+	ID         int64
+	Scope      string
+	AuthorID   string
+	AuthorName string
+	Body       string
+	CreatedAt  int64
+}
+
+// AppendMessage inserts one message row in scope and returns it with the id
+// SQLite assigned. The author identity and timestamp are stamped by the
+// caller; the store only persists them.
+func (s *Store) AppendMessage(ctx context.Context, scope, authorID, authorName, body string, createdAt int64) (*Message, error) {
+	res, err := s.db.ExecContext(ctx, `
+		INSERT INTO messages (scope, author_id, author_name, body, created_at)
+		VALUES (?, ?, ?, ?, ?)`,
+		scope, authorID, authorName, body, createdAt)
+	if err != nil {
+		return nil, fmt.Errorf("insert message: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return nil, fmt.Errorf("message id: %w", err)
+	}
+	return &Message{
+		ID:         id,
+		Scope:      scope,
+		AuthorID:   authorID,
+		AuthorName: authorName,
+		Body:       body,
+		CreatedAt:  createdAt,
+	}, nil
+}
+
+// RecentMessages returns up to limit messages in scope with ids greater than
+// afterID — the most recent ones when more than limit match — ordered
+// oldest-first. afterID zero reads plain recent history. The (scope, id)
+// index backs the lookup.
+func (s *Store) RecentMessages(ctx context.Context, scope string, afterID int64, limit int) ([]Message, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, scope, author_id, author_name, body, created_at
+		FROM messages
+		WHERE scope = ? AND id > ?
+		ORDER BY id DESC
+		LIMIT ?`, scope, afterID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query messages: %w", err)
+	}
+	defer rows.Close()
+
+	var messages []Message
+	for rows.Next() {
+		var m Message
+		if err := rows.Scan(&m.ID, &m.Scope, &m.AuthorID, &m.AuthorName, &m.Body, &m.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan message: %w", err)
+		}
+		messages = append(messages, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate messages: %w", err)
+	}
+
+	// The query walks newest-first; callers read oldest-first.
+	slices.Reverse(messages)
+	return messages, nil
 }
 
 // NewSessionToken mints the random cookie value for a login session. Tokens
