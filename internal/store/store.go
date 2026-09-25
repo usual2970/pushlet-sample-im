@@ -1,0 +1,263 @@
+// Package store persists sample-im's application data — accounts, login
+// sessions, and chat messages — in a single SQLite file kept separate from
+// the novaque relay database.
+package store
+
+import (
+	"context"
+	"crypto/rand"
+	"database/sql"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"golang.org/x/crypto/bcrypt"
+	_ "modernc.org/sqlite"
+)
+
+// ErrPairExists reports a registration whose (username, password) pair
+// already belongs to an existing account. Usernames may duplicate freely,
+// but one name combined with one password identifies exactly one account.
+var ErrPairExists = fmt.Errorf("an account with this username and password already exists")
+
+// User is one registered account.
+type User struct {
+	ID           string
+	Username     string
+	PasswordHash string
+	DMSecret     string
+	CreatedAt    int64
+}
+
+// schema is applied idempotently on every [Open]. The messages table is
+// created here already so chat (U3) and direct messages (U5) build on it
+// without their own migration step.
+const schema = `
+CREATE TABLE IF NOT EXISTS users (
+	id            TEXT PRIMARY KEY,
+	username      TEXT NOT NULL,
+	password_hash TEXT NOT NULL,
+	dm_secret     TEXT NOT NULL,
+	created_at    INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sessions (
+	token      TEXT PRIMARY KEY,
+	user_id    TEXT NOT NULL REFERENCES users(id),
+	created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS messages (
+	id          INTEGER PRIMARY KEY AUTOINCREMENT,
+	scope       TEXT NOT NULL,
+	author_id   TEXT NOT NULL,
+	author_name TEXT NOT NULL,
+	body        TEXT NOT NULL,
+	created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_messages_scope_id ON messages (scope, id);
+`
+
+// Store owns the application SQLite database (accounts, sessions, messages).
+// Construct it with [Open] and pair every successful open with [Close].
+type Store struct {
+	db *sql.DB
+
+	// regMu serializes registration's compare-then-insert critical section.
+	// Pair uniqueness cannot be a unique index (bcrypt hashes are salted), so
+	// Register compares the candidate password against every same-name
+	// account and then inserts while holding regMu — otherwise two
+	// concurrent registrations of the same pair could both pass the compare
+	// and both insert.
+	regMu sync.Mutex
+}
+
+// Open opens (creating if needed) the SQLite database at path, applies the
+// schema, and verifies the file is reachable. The DSN mirrors the relay
+// database's pragma shape: enforced foreign keys, WAL journaling, and a 10s
+// busy timeout.
+func Open(path string) (*Store, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, fmt.Errorf("create data directory: %w", err)
+	}
+	dsn := "file:" + path + "?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite open: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := db.ExecContext(ctx, schema); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("apply schema: %w", err)
+	}
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("sqlite ping: %w", err)
+	}
+	return &Store{db: db}, nil
+}
+
+// Close closes the underlying database handle. It is safe to call more than
+// once.
+func (s *Store) Close() error {
+	return s.db.Close()
+}
+
+// Register creates a new account for username/password unless an existing
+// account already has both the same username and the same password, in which
+// case it returns [ErrPairExists]. Usernames may duplicate (the pair rule is
+// the only uniqueness constraint); ids and dm secrets are freshly minted
+// random tokens, and the password is stored only as a bcrypt hash. The
+// same-name comparison and the insert run under one lock so concurrent
+// registrations of the same pair cannot both succeed.
+func (s *Store) Register(ctx context.Context, username string, password []byte) (*User, error) {
+	hash, err := bcrypt.GenerateFromPassword(password, bcrypt.DefaultCost)
+	if err != nil {
+		return nil, fmt.Errorf("hash password: %w", err)
+	}
+	id, err := randomToken()
+	if err != nil {
+		return nil, fmt.Errorf("mint user id: %w", err)
+	}
+	dmSecret, err := randomToken()
+	if err != nil {
+		return nil, fmt.Errorf("mint dm secret: %w", err)
+	}
+
+	user := &User{
+		ID:           id,
+		Username:     username,
+		PasswordHash: string(hash),
+		DMSecret:     dmSecret,
+		CreatedAt:    time.Now().Unix(),
+	}
+
+	s.regMu.Lock()
+	defer s.regMu.Unlock()
+
+	rows, err := s.db.QueryContext(ctx, `SELECT password_hash FROM users WHERE username = ?`, username)
+	if err != nil {
+		return nil, fmt.Errorf("query same-name accounts: %w", err)
+	}
+	for rows.Next() {
+		var existing string
+		if err := rows.Scan(&existing); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan same-name account: %w", err)
+		}
+		if bcrypt.CompareHashAndPassword([]byte(existing), password) == nil {
+			rows.Close()
+			return nil, ErrPairExists
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("iterate same-name accounts: %w", err)
+	}
+	rows.Close()
+
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO users (id, username, password_hash, dm_secret, created_at)
+		VALUES (?, ?, ?, ?, ?)`,
+		user.ID, user.Username, user.PasswordHash, user.DMSecret, user.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("insert user: %w", err)
+	}
+	return user, nil
+}
+
+// UsersByName returns every account registered under username, oldest first.
+// Several accounts may share a name; login disambiguates by password.
+func (s *Store) UsersByName(ctx context.Context, username string) ([]User, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, username, password_hash, dm_secret, created_at
+		FROM users WHERE username = ? ORDER BY created_at, id`, username)
+	if err != nil {
+		return nil, fmt.Errorf("query users by name: %w", err)
+	}
+	defer rows.Close()
+
+	var users []User
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.DMSecret, &u.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan user: %w", err)
+		}
+		users = append(users, u)
+	}
+	return users, rows.Err()
+}
+
+// UserByID returns the account with the given id, or (nil, nil) when no such
+// account exists.
+func (s *Store) UserByID(ctx context.Context, id string) (*User, error) {
+	var u User
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, username, dm_secret, created_at FROM users WHERE id = ?`, id).
+		Scan(&u.ID, &u.Username, &u.DMSecret, &u.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query user by id: %w", err)
+	}
+	return &u, nil
+}
+
+// NewSessionToken mints the random cookie value for a login session. Tokens
+// use the same URL-safe alphabet as user ids.
+func (s *Store) NewSessionToken() (string, error) {
+	return randomToken()
+}
+
+// CreateSession persists a login session token for user.
+func (s *Store) CreateSession(ctx context.Context, token, userID string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)`,
+		token, userID, time.Now().Unix())
+	if err != nil {
+		return fmt.Errorf("insert session: %w", err)
+	}
+	return nil
+}
+
+// UserBySession resolves a session token to its account, or (nil, nil) when
+// the token is unknown — the middleware treats both the same.
+func (s *Store) UserBySession(ctx context.Context, token string) (*User, error) {
+	var u User
+	err := s.db.QueryRowContext(ctx, `
+		SELECT u.id, u.username, u.dm_secret, u.created_at
+		FROM sessions s JOIN users u ON u.id = s.user_id
+		WHERE s.token = ?`, token).
+		Scan(&u.ID, &u.Username, &u.DMSecret, &u.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query session: %w", err)
+	}
+	return &u, nil
+}
+
+// DeleteSession removes a login session, logging the user out.
+func (s *Store) DeleteSession(ctx context.Context, token string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE token = ?`, token)
+	if err != nil {
+		return fmt.Errorf("delete session: %w", err)
+	}
+	return nil
+}
+
+// randomToken returns a 22-character token drawn from crypto/rand and encoded
+// URL-safe: 128 bits of entropy, safe for cookies, ids, and topic names.
+func randomToken() (string, error) {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("crypto/rand: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}

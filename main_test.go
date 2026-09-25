@@ -24,13 +24,15 @@ import (
 const testPollInterval = 25 * time.Millisecond
 
 // newTestApp returns a started App served over an ephemeral port with its
-// relay database inside t.TempDir(). The registered cleanups close the test
-// server first and stop the app after (LIFO order), mirroring production
-// shutdown.
+// relay and application databases inside t.TempDir(). The registered
+// cleanups close the test server first and stop the app after (LIFO order),
+// mirroring production shutdown.
 func newTestApp(t *testing.T) (*App, *httptest.Server) {
 	t.Helper()
+	dir := t.TempDir()
 	app, err := NewApp(Config{
-		DBPath:       filepath.Join(t.TempDir(), "relay.db"),
+		DBPath:       filepath.Join(dir, "relay.db"),
+		AppDBPath:    filepath.Join(dir, "app.db"),
 		PollInterval: testPollInterval,
 	})
 	if err != nil {
@@ -73,6 +75,69 @@ func TestIndexRoute(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestAuthRoutesMountedThroughApp proves the auth surface (U2) is wired into
+// the whole App: registering through the API sets a cookie that carries an
+// authenticated request through the middleware to the /chat page.
+func TestAuthRoutesMountedThroughApp(t *testing.T) {
+	_, ts := newTestApp(t)
+
+	resp, err := http.Post(ts.URL+"/api/register", "application/json",
+		strings.NewReader(`{"username":"wired","password":"pw"}`))
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("register status %d, want 200", resp.StatusCode)
+	}
+	var session string
+	for _, c := range resp.Cookies() {
+		if c.Name == "sample_im_session" {
+			session = c.Value
+		}
+	}
+	if session == "" {
+		t.Fatal("register through the app set no session cookie")
+	}
+
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/chat", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.AddCookie(&http.Cookie{Name: "sample_im_session", Value: session})
+	chat, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("get /chat: %v", err)
+	}
+	defer chat.Body.Close()
+	body, err := io.ReadAll(chat.Body)
+	if err != nil {
+		t.Fatalf("read /chat body: %v", err)
+	}
+	if chat.StatusCode != http.StatusOK {
+		t.Fatalf("/chat status %d, want 200", chat.StatusCode)
+	}
+	if !strings.Contains(string(body), "wired") {
+		t.Fatalf("/chat body %q does not greet the registered user", body)
+	}
+
+	// Anonymous page navigation is redirected to the login page.
+	noRedirect := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	anon, err := noRedirect.Get(ts.URL + "/chat")
+	if err != nil {
+		t.Fatalf("get /chat anonymously: %v", err)
+	}
+	defer anon.Body.Close()
+	if anon.StatusCode != http.StatusFound {
+		t.Fatalf("anonymous /chat status %d, want 302", anon.StatusCode)
+	}
+	if loc := anon.Header.Get("Location"); loc != "/login" {
+		t.Fatalf("anonymous /chat redirects to %q, want /login", loc)
 	}
 }
 
@@ -175,8 +240,10 @@ func TestWebSocketSubscriberReceivesPublishedMessage(t *testing.T) {
 // handlers mounted by NewApp answer 503 until App.Start runs the broker, so
 // Start must be called before serving traffic.
 func TestPushHandlersUnavailableBeforeStart(t *testing.T) {
+	dir := t.TempDir()
 	app, err := NewApp(Config{
-		DBPath:       filepath.Join(t.TempDir(), "relay.db"),
+		DBPath:       filepath.Join(dir, "relay.db"),
+		AppDBPath:    filepath.Join(dir, "app.db"),
 		PollInterval: testPollInterval,
 	})
 	if err != nil {

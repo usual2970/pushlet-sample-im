@@ -7,8 +7,10 @@ package main
 import (
 	"context"
 	"database/sql"
+	"embed"
 	"errors"
 	"fmt"
+	"html/template"
 	"log"
 	"maps"
 	"net/http"
@@ -26,6 +28,9 @@ import (
 	"github.com/usual2970/novaque"
 	"github.com/usual2970/novaque/driver/sqlite"
 	"github.com/usual2970/pushlet"
+
+	"github.com/usual2970/sample-im/internal/auth"
+	"github.com/usual2970/sample-im/internal/store"
 )
 
 // Default runtime settings. The listen address deliberately avoids the
@@ -33,8 +38,15 @@ import (
 const (
 	defaultAddr         = ":8080"
 	defaultDBPath       = "data/relay.db"
+	defaultAppDBPath    = "data/app.db"
 	defaultShutdownWait = 5 * time.Second
 )
+
+// templateFS embeds the server-rendered pages so the single binary serves
+// them no matter where it runs from.
+//
+//go:embed web/templates/login.html
+var templateFS embed.FS
 
 // Config controls one sample-im process. Zero-valued fields fall back to the
 // package defaults above; tests override the database path and relay poll
@@ -47,6 +59,11 @@ type Config struct {
 	// DBPath is the SQLite file backing the novaque relay.
 	DBPath string
 
+	// AppDBPath is the SQLite file backing the application store
+	// (accounts, sessions, messages). It is kept separate from the relay
+	// database.
+	AppDBPath string
+
 	// PollInterval is the novaque consumer idle poll for the relay topic.
 	// Zero keeps novaque's default (200ms with jitter); tests lower it to
 	// make relay round trips land well inside read deadlines.
@@ -56,8 +73,9 @@ type Config struct {
 // configFromEnv reads runtime configuration from the environment.
 func configFromEnv() Config {
 	return Config{
-		Addr:   envOr("SAMPLE_IM_ADDR", defaultAddr),
-		DBPath: defaultDBPath,
+		Addr:      envOr("SAMPLE_IM_ADDR", defaultAddr),
+		DBPath:    defaultDBPath,
+		AppDBPath: defaultAppDBPath,
 	}
 }
 
@@ -68,32 +86,54 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-// App wires the SQLite-backed novaque relay, the pushlet instance, and the
-// HTTP handlers for one process. Construct it with [NewApp], serve
-// [App.Handler], and always pair [App.Start] with [App.Stop].
+// App wires the SQLite-backed novaque relay, the pushlet instance, the
+// application store, and the HTTP handlers for one process. Construct it
+// with [NewApp], serve [App.Handler], and always pair [App.Start] with
+// [App.Stop].
 type App struct {
-	cfg    Config
-	db     *sql.DB
-	push   *pushlet.Pushlet
-	mux    *http.ServeMux
-	stopOn sync.Once
+	cfg      Config
+	db       *sql.DB
+	appStore *store.Store
+	authSrv  *auth.Service
+	push     *pushlet.Pushlet
+	mux      *http.ServeMux
+	stopOn   sync.Once
 }
 
-// NewApp opens the relay database, constructs the pushlet instance in
-// distributed mode, and mounts its handlers. Nothing runs until [App.Start];
-// before that, the push handlers answer 503 because the broker is not yet
-// running. EnableDistributedNovaque also migrates the novaque schema, so a
-// broken database fails here rather than at first publish.
+// NewApp opens the relay and application databases, constructs the pushlet
+// instance in distributed mode, and mounts its handlers. Nothing runs until
+// [App.Start]; before that, the push handlers answer 503 because the broker
+// is not yet running. EnableDistributedNovaque also migrates the novaque
+// schema, so a broken database fails here rather than at first publish.
 func NewApp(cfg Config) (*App, error) {
 	if cfg.DBPath == "" {
 		cfg.DBPath = defaultDBPath
+	}
+	if cfg.AppDBPath == "" {
+		cfg.AppDBPath = defaultAppDBPath
 	}
 
 	db, err := openRelayDB(cfg.DBPath)
 	if err != nil {
 		return nil, err
 	}
-	app := &App{cfg: cfg, db: db}
+	appStore, err := store.Open(cfg.AppDBPath)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	closeDBs := func() {
+		_ = db.Close()
+		_ = appStore.Close()
+	}
+
+	tpl, err := template.ParseFS(templateFS, "web/templates/login.html")
+	if err != nil {
+		closeDBs()
+		return nil, fmt.Errorf("parse templates: %w", err)
+	}
+
+	app := &App{cfg: cfg, db: db, appStore: appStore, authSrv: auth.NewService(appStore, tpl)}
 
 	opts := pushlet.DefaultDistributedOptions()
 	if cfg.PollInterval > 0 {
@@ -101,13 +141,13 @@ func NewApp(cfg Config) (*App, error) {
 	}
 	client, err := novaque.Open(sqlite.New(db), opts.Novaque)
 	if err != nil {
-		_ = db.Close()
+		closeDBs()
 		return nil, fmt.Errorf("novaque open: %w", err)
 	}
 
 	app.push = pushlet.New(pushlet.WithLogger(newRedactingLogger))
 	if err := app.push.EnableDistributedNovaque(client, opts); err != nil {
-		_ = db.Close()
+		closeDBs()
 		return nil, fmt.Errorf("distributed mode: %w", err)
 	}
 
@@ -117,11 +157,17 @@ func NewApp(cfg Config) (*App, error) {
 }
 
 // mountRoutes wires the HTTP surface. Keep this in one place so later units
-// (auth, chat, presence) extend the service by mounting more handlers here.
+// (chat, presence, DMs) extend the service by mounting more handlers here.
 func (a *App) mountRoutes() {
 	a.mux.HandleFunc("/health", handleHealth)
 	a.mux.HandleFunc("/events", a.push.HandleSSE)
 	a.mux.HandleFunc("/ws", a.push.HandleWebsocket)
+	a.mux.HandleFunc("/api/register", a.authSrv.HandleRegister)
+	a.mux.HandleFunc("/api/login", a.authSrv.HandleLogin)
+	a.mux.Handle("/api/logout", a.authSrv.RequireAuth(http.HandlerFunc(a.authSrv.HandleLogout)))
+	a.mux.Handle("/api/me", a.authSrv.RequireAuth(http.HandlerFunc(a.authSrv.HandleMe)))
+	a.mux.HandleFunc("/login", a.authSrv.HandleLoginPage)
+	a.mux.Handle("/chat", a.authSrv.RequireAuth(http.HandlerFunc(handleChat)))
 	a.mux.HandleFunc("/", handleIndex)
 }
 
@@ -132,13 +178,14 @@ func (a *App) Start() {
 }
 
 // Stop shuts the pushlet instance down (broker, relay consumer, novaque
-// client, in that order) and then closes the relay database. It is safe to
-// call more than once. Servers serving [App.Handler] must be shut down
-// before Stop so live streams drain first.
+// client, in that order) and then closes both databases. It is safe to call
+// more than once. Servers serving [App.Handler] must be shut down before
+// Stop so live streams drain first.
 func (a *App) Stop() {
 	a.stopOn.Do(func() {
 		a.push.Stop()
 		_ = a.db.Close()
+		_ = a.appStore.Close()
 	})
 }
 
@@ -182,6 +229,19 @@ func handleIndex(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintln(w, "  GET /health           liveness probe")
 	fmt.Fprintln(w, "  GET /events?topic=t   SSE stream for topic t")
 	fmt.Fprintln(w, "  GET /ws?topic=t       WebSocket stream for topic t")
+	fmt.Fprintln(w, "  GET /login            sign in or create an account")
+	fmt.Fprintln(w, "  POST /api/register    create an account (JSON)")
+	fmt.Fprintln(w, "  POST /api/login       sign in (JSON)")
+	fmt.Fprintln(w, "  POST /api/logout      sign out")
+	fmt.Fprintln(w, "  GET /api/me           the signed-in user (JSON)")
+}
+
+// handleChat is the placeholder for the chat room page (U3). It sits behind
+// the auth middleware, so anonymous visitors are redirected to /login first.
+func handleChat(w http.ResponseWriter, r *http.Request) {
+	user, _ := auth.FromContext(r.Context())
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	fmt.Fprintf(w, "hi %s — chat coming in U3\n", user.Username)
 }
 
 // dmTopicPrefix marks direct-message topics. Their names identify

@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sample-im — sign in</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: #f4f5f7;
+    color: #1d1d1f;
+  }
+  main {
+    width: 20rem;
+    padding: 1.75rem;
+    background: #ffffff;
+    border: 1px solid #e2e4e8;
+    border-radius: 10px;
+  }
+  h1 { margin: 0 0 1.25rem; font-size: 1.4rem; }
+  h2 { margin: 0 0 1rem; font-size: 1.05rem; font-weight: 600; }
+  label { display: block; margin-bottom: 0.75rem; font-size: 0.85rem; }
+  input {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    margin-top: 0.25rem;
+    padding: 0.5rem 0.6rem;
+    font: inherit;
+    border: 1px solid #c6c9cf;
+    border-radius: 6px;
+  }
+  button {
+    width: 100%;
+    padding: 0.55rem;
+    font: inherit;
+    font-weight: 600;
+    color: #ffffff;
+    background: #2f6fed;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  button:hover { background: #265fd0; }
+  #error {
+    margin-bottom: 1rem;
+    padding: 0.5rem 0.6rem;
+    font-size: 0.85rem;
+    color: #a4161a;
+    background: #fbeaea;
+    border: 1px solid #efc7c7;
+    border-radius: 6px;
+  }
+  .switch { margin: 1rem 0 0; font-size: 0.85rem; text-align: center; }
+  form:not(.active) { display: none; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #16181d; color: #e8eaed; }
+    main { background: #1f2229; border-color: #33363e; }
+    input { background: #16181d; color: #e8eaed; border-color: #3f434c; }
+    #error { background: #3a2020; border-color: #5c2b2b; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>sample-im</h1>
+  <div id="error" hidden></div>
+
+  <form id="login-form" class="active" autocomplete="on">
+    <h2>Sign in</h2>
+    <label>Username
+      <input name="username" autocomplete="username" required
+             pattern="[A-Za-z0-9_-]{1,32}"
+             title="Letters, digits, '-' and '_', at most 32 characters">
+    </label>
+    <label>Password
+      <input type="password" name="password" autocomplete="current-password" required>
+    </label>
+    <button type="submit">Sign in</button>
+    <p class="switch">No account yet? <a href="#" id="to-register">Create one</a></p>
+  </form>
+
+  <form id="register-form">
+    <h2>Create account</h2>
+    <label>Username
+      <input name="username" autocomplete="username" required
+             pattern="[A-Za-z0-9_-]{1,32}"
+             title="Letters, digits, '-' and '_', at most 32 characters">
+    </label>
+    <label>Password
+      <input type="password" name="password" autocomplete="new-password" required>
+    </label>
+    <button type="submit">Create account</button>
+    <p class="switch">Already registered? <a href="#" id="to-login">Sign in</a></p>
+  </form>
+</main>
+
+<script>
+'use strict';
+
+const errorBox = document.getElementById('error');
+const loginForm = document.getElementById('login-form');
+const registerForm = document.getElementById('register-form');
+
+function showError(message) {
+  errorBox.textContent = message;
+  errorBox.hidden = false;
+}
+
+function toggle(show, hide) {
+  show.classList.add('active');
+  hide.classList.remove('active');
+  errorBox.hidden = true;
+}
+
+document.getElementById('to-register').addEventListener('click', () => toggle(registerForm, loginForm));
+document.getElementById('to-login').addEventListener('click', () => toggle(loginForm, registerForm));
+
+function wire(form, path) {
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    errorBox.hidden = true;
+    const username = form.elements.username.value.trim();
+    const password = form.elements.password.value;
+    try {
+      const res = await fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: username, password: password }),
+      });
+      if (res.ok) {
+        window.location.href = '/chat';
+        return;
+      }
+      let message = 'request failed with status ' + res.status;
+      try { message = (await res.json()).error || message; } catch (_) { /* non-JSON body */ }
+      showError(message);
+    } catch (err) {
+      showError('network error: ' + err);
+    }
+  });
+}
+
+wire(loginForm, '/api/login');
+wire(registerForm, '/api/register');
+</script>
+</body>
+</html>

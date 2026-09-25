@@ -6,6 +6,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/usual2970/novaque v0.0.14
 	github.com/usual2970/pushlet v0.0.20
+	golang.org/x/crypto v0.57.0
 	modernc.org/sqlite v1.59.0
 )
 
@@ -22,7 +23,7 @@ require (
 	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/multierr v1.10.0 // indirect
 	go.uber.org/zap v1.28.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
 	modernc.org/libc v1.75.7 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
