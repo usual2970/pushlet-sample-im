@@ -30,7 +30,8 @@
   </main>
   <aside id="online" class="online" aria-label="Online users">
     <h2>Online</h2>
-    <!-- U4 (presence) fills this list; U3 only reserves the container. -->
+    <!-- app.js fills this from presence snapshots: the join reply and every
+         "presence" stream event on the room topic. -->
     <ul id="online-list"></ul>
   </aside>
 </div>

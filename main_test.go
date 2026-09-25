@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -17,6 +18,8 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/usual2970/pushlet"
+
+	"github.com/usual2970/sample-im/internal/presence"
 )
 
 // testPollInterval keeps novaque relay round trips well inside the read
@@ -440,6 +443,239 @@ func TestRedactingLoggerRedactsDMTopics(t *testing.T) {
 	if strings.Contains(buf.String(), "c2") {
 		t.Fatalf("WithField mutated the parent logger: %q", buf.String())
 	}
+}
+
+// TestPresenceRoutesMountedThroughApp proves the presence surface (U4) is
+// wired into the whole App, including the duplicate-name disambiguation
+// (KTD5): two accounts sharing the username "twin" join, both render as
+// twin#<id suffix>, and after one leaves through a beacon-shaped POST the
+// survivor reverts to the plain name.
+func TestPresenceRoutesMountedThroughApp(t *testing.T) {
+	_, ts := newTestApp(t)
+
+	// Anonymous presence calls are rejected like every other /api route.
+	noRedirect := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	for _, path := range []string{"/api/presence/join", "/api/presence/heartbeat", "/api/leave"} {
+		resp, err := noRedirect.Post(ts.URL+path, "", nil)
+		if err != nil {
+			t.Fatalf("anonymous post %s: %v", path, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("anonymous POST %s status %d, want 401", path, resp.StatusCode)
+		}
+	}
+
+	// Two accounts may share a name when their passwords differ.
+	cookie1, id1 := registerViaAPI(t, ts, "twin", "one")
+	cookie2, id2 := registerViaAPI(t, ts, "twin", "two")
+	if id1 == id2 {
+		t.Fatal("the two twin accounts share one id")
+	}
+
+	first := joinPresence(t, ts, cookie1)
+	if u, ok := findPresenceUser(first, id1); !ok || u.Display != "twin" {
+		t.Fatalf("lone twin entry %+v (found %v), want the plain name", u, ok)
+	}
+
+	second := joinPresence(t, ts, cookie2)
+	u1, ok := findPresenceUser(second, id1)
+	if !ok {
+		t.Fatalf("second join snapshot %+v lost the first twin", second.Online)
+	}
+	u2, ok := findPresenceUser(second, id2)
+	if !ok {
+		t.Fatalf("second join snapshot %+v lost the second twin", second.Online)
+	}
+	if want := "twin#" + idSuffix(id1); u1.Display != want {
+		t.Fatalf("first twin displays %q, want %q", u1.Display, want)
+	}
+	if want := "twin#" + idSuffix(id2); u2.Display != want {
+		t.Fatalf("second twin displays %q, want %q", u2.Display, want)
+	}
+
+	// Heartbeat answers 200 and leave accepts a beacon-shaped POST (empty
+	// body, no Content-Type) — the exact shape page unload sends.
+	hb, err := http.NewRequest(http.MethodPost, ts.URL+"/api/presence/heartbeat", nil)
+	if err != nil {
+		t.Fatalf("new heartbeat: %v", err)
+	}
+	hb.AddCookie(&http.Cookie{Name: "sample_im_session", Value: cookie1})
+	hbResp, err := http.DefaultClient.Do(hb)
+	if err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	hbResp.Body.Close()
+	if hbResp.StatusCode != http.StatusOK {
+		t.Fatalf("heartbeat status %d, want 200", hbResp.StatusCode)
+	}
+
+	leave, err := http.NewRequest(http.MethodPost, ts.URL+"/api/leave", nil)
+	if err != nil {
+		t.Fatalf("new leave: %v", err)
+	}
+	leave.AddCookie(&http.Cookie{Name: "sample_im_session", Value: cookie2})
+	leaveResp, err := http.DefaultClient.Do(leave)
+	if err != nil {
+		t.Fatalf("leave: %v", err)
+	}
+	leaveResp.Body.Close()
+	if leaveResp.StatusCode != http.StatusOK {
+		t.Fatalf("leave status %d, want 200", leaveResp.StatusCode)
+	}
+
+	healed := joinPresence(t, ts, cookie1)
+	if got := len(healed.Online); got != 1 {
+		t.Fatalf("after the leave %d online (%+v), want the survivor alone", got, healed.Online)
+	}
+	if u, ok := findPresenceUser(healed, id1); !ok || u.Display != "twin" {
+		t.Fatalf("survivor entry %+v (found %v), want the plain name back", u, ok)
+	}
+}
+
+// TestPresenceJoinReachesSSESubscriberThroughRelay drives presence over the
+// novaque relay: a subscribed SSE client sees the join snapshot as a
+// "presence" event on the room topic, and the leave snapshot after the
+// beacon-shaped POST.
+func TestPresenceJoinReachesSSESubscriberThroughRelay(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, ts := newTestApp(t)
+
+	stream := openSSE(t, ctx, ts.URL+"/events?topic=room")
+	if event, _ := stream.next(t); event != "connected" {
+		t.Fatalf("first event %q, want connected", event)
+	}
+
+	cookie, id := registerViaAPI(t, ts, "watcher", "pw")
+	joinPresence(t, ts, cookie)
+
+	var joined presence.Snapshot
+	for {
+		event, data := stream.next(t)
+		if event != "presence" {
+			t.Logf("skipping event %q while waiting for presence", event)
+			continue
+		}
+		if err := json.Unmarshal([]byte(data), &joined); err != nil {
+			t.Fatalf("decode presence data %q: %v", data, err)
+		}
+		break
+	}
+	if u, ok := findPresenceUser(joined, id); !ok || u.Name != "watcher" || u.Display != "watcher" {
+		t.Fatalf("presence event entry %+v (found %v), want watcher", u, ok)
+	}
+
+	leave, err := http.NewRequest(http.MethodPost, ts.URL+"/api/leave", nil)
+	if err != nil {
+		t.Fatalf("new leave: %v", err)
+	}
+	leave.AddCookie(&http.Cookie{Name: "sample_im_session", Value: cookie})
+	leaveResp, err := http.DefaultClient.Do(leave)
+	if err != nil {
+		t.Fatalf("leave: %v", err)
+	}
+	leaveResp.Body.Close()
+	if leaveResp.StatusCode != http.StatusOK {
+		t.Fatalf("leave status %d, want 200", leaveResp.StatusCode)
+	}
+
+	for {
+		event, data := stream.next(t)
+		if event != "presence" {
+			t.Logf("skipping event %q while waiting for presence", event)
+			continue
+		}
+		var snap presence.Snapshot
+		if err := json.Unmarshal([]byte(data), &snap); err != nil {
+			t.Fatalf("decode presence data %q: %v", data, err)
+		}
+		if _, ok := findPresenceUser(snap, id); ok {
+			continue // a snapshot from before the leave landed
+		}
+		if got := len(snap.Online); got != 0 {
+			t.Fatalf("post-leave snapshot %+v, want it empty", snap.Online)
+		}
+		return
+	}
+}
+
+// registerViaAPI creates an account through the HTTP register endpoint and
+// returns its session cookie and user id.
+func registerViaAPI(t *testing.T, ts *httptest.Server, username, password string) (session, userID string) {
+	t.Helper()
+	resp, err := http.Post(ts.URL+"/api/register", "application/json",
+		strings.NewReader(fmt.Sprintf(`{"username":%q,"password":%q}`, username, password)))
+	if err != nil {
+		t.Fatalf("register %s: %v", username, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("register %s status %d, want 200", username, resp.StatusCode)
+	}
+	for _, c := range resp.Cookies() {
+		if c.Name == "sample_im_session" {
+			session = c.Value
+		}
+	}
+	if session == "" {
+		t.Fatalf("register %s set no session cookie", username)
+	}
+	var reply struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil {
+		t.Fatalf("decode register reply: %v", err)
+	}
+	if reply.ID == "" {
+		t.Fatalf("register %s reply carries no id", username)
+	}
+	return session, reply.ID
+}
+
+// joinPresence POSTs the join endpoint carrying the session cookie and
+// decodes the online-list snapshot reply.
+func joinPresence(t *testing.T, ts *httptest.Server, session string) presence.Snapshot {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/presence/join", nil)
+	if err != nil {
+		t.Fatalf("new join: %v", err)
+	}
+	req.AddCookie(&http.Cookie{Name: "sample_im_session", Value: session})
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("join: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("join status %d, want 200", resp.StatusCode)
+	}
+	var snap presence.Snapshot
+	if err := json.NewDecoder(resp.Body).Decode(&snap); err != nil {
+		t.Fatalf("decode join reply: %v", err)
+	}
+	return snap
+}
+
+// findPresenceUser returns the snapshot entry with the given id.
+func findPresenceUser(s presence.Snapshot, id string) (presence.User, bool) {
+	for _, u := range s.Online {
+		if u.ID == id {
+			return u, true
+		}
+	}
+	return presence.User{}, false
+}
+
+// idSuffix mirrors the display-name suffix the server derives from a user
+// id: the last four characters.
+func idSuffix(id string) string {
+	if len(id) <= 4 {
+		return id
+	}
+	return id[len(id)-4:]
 }
 
 // sseStream reads one Server-Sent Events connection into parsed events.

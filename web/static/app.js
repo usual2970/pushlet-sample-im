@@ -2,9 +2,10 @@
 
 // sample-im room client. Subscribes to the fixed "room" SSE topic, merges
 // stream messages with the server-rendered history keyed on server message
-// ids, and posts new messages to /api/messages. Security rule (KTD12): every
-// piece of dynamic text is set through textContent — user content never
-// touches innerHTML.
+// ids, posts new messages to /api/messages, and tracks the caller's presence
+// (join on every (re)connect, heartbeats, a leave beacon on unload).
+// Security rule (KTD12): every piece of dynamic text is set through
+// textContent — user content never touches innerHTML.
 
 const messagesList = document.getElementById('messages');
 const composerForm = document.getElementById('composer');
@@ -12,6 +13,7 @@ const composerInput = document.getElementById('composer-input');
 const composerError = document.getElementById('composer-error');
 const connBanner = document.getElementById('conn-banner');
 const logoutButton = document.getElementById('logout');
+const onlineList = document.getElementById('online-list');
 
 let lastSeenId = 0;         // highest server message id rendered
 const seenIds = new Set();  // every server message id rendered
@@ -101,6 +103,7 @@ const events = new EventSource('/events?topic=room');
 events.addEventListener('connected', () => {
   connBanner.hidden = true;
   backfill();
+  joinPresence();
 });
 
 events.addEventListener('message', (ev) => {
@@ -113,9 +116,20 @@ events.addEventListener('message', (ev) => {
   mergeMessage(msg);
 });
 
+events.addEventListener('presence', (ev) => {
+  let snapshot;
+  try {
+    snapshot = JSON.parse(ev.data);
+  } catch (err) {
+    return;
+  }
+  renderOnline(snapshot);
+});
+
 events.onerror = () => {
   // EventSource retries on its own; the banner stays up until the next
-  // connected event, which also backfills whatever was missed.
+  // connected event, which also backfills whatever was missed and re-joins
+  // presence.
   connBanner.hidden = false;
 };
 
@@ -135,6 +149,61 @@ async function backfill() {
     // Offline mid-reconnect; the next connected event retries.
   }
 }
+
+// ---- presence ----
+
+// renderOnline rebuilds the online list from a presence snapshot: the join
+// reply and every "presence" stream event both carry the full list, so a
+// plain replace converges. Display names (already disambiguated server-side
+// as name#xxxx for duplicate usernames) are user content: textContent only.
+function renderOnline(snapshot) {
+  if (!snapshot || !Array.isArray(snapshot.online)) return;
+  const rows = [];
+  for (const user of snapshot.online) {
+    const row = document.createElement('li');
+    row.dataset.id = String(user.id);
+    row.textContent = user.display || user.name || '';
+    rows.push(row);
+  }
+  onlineList.replaceChildren(...rows);
+}
+
+// joinPresence announces the caller and renders the list from the reply.
+// Running it on every connected event (initial and each reconnect) makes
+// presence self-heal after server restarts: a fresh stream always re-joins.
+async function joinPresence() {
+  try {
+    const res = await fetch('/api/presence/join', { method: 'POST' });
+    if (!res.ok) return;
+    renderOnline(await res.json());
+  } catch (err) {
+    // Offline mid-reconnect; the next connected event retries the join.
+  }
+}
+
+// sendHeartbeat refreshes the server-side lastSeen; nobody reads the reply.
+function sendHeartbeat() {
+  fetch('/api/presence/heartbeat', { method: 'POST' }).catch(() => {});
+}
+
+// One interval for the page's lifetime. 15s of cadence against the server's
+// 45s TTL tolerates a couple of dropped beats; the visibilitychange nudge
+// below covers background tabs, where browsers throttle timers.
+setInterval(sendHeartbeat, 15000);
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') sendHeartbeat();
+});
+
+// Leaving: navigator.sendBeacon issues a plain same-origin POST with the
+// session cookie attached and no body to read, which /api/leave accepts.
+// Both unload events can fire for one navigation; the server treats a
+// duplicate beacon as a no-op, so sending from both is safe.
+function leavePresence() {
+  if (navigator.sendBeacon) navigator.sendBeacon('/api/leave');
+}
+window.addEventListener('beforeunload', leavePresence);
+window.addEventListener('pagehide', leavePresence);
 
 // ---- composer ----
 

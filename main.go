@@ -32,6 +32,7 @@ import (
 
 	"github.com/usual2970/sample-im/internal/auth"
 	"github.com/usual2970/sample-im/internal/chat"
+	"github.com/usual2970/sample-im/internal/presence"
 	"github.com/usual2970/sample-im/internal/store"
 )
 
@@ -99,14 +100,15 @@ func envOr(key, fallback string) string {
 // with [NewApp], serve [App.Handler], and always pair [App.Start] with
 // [App.Stop].
 type App struct {
-	cfg      Config
-	db       *sql.DB
-	appStore *store.Store
-	authSrv  *auth.Service
-	chatSrv  *chat.Service
-	push     *pushlet.Pushlet
-	mux      *http.ServeMux
-	stopOn   sync.Once
+	cfg         Config
+	db          *sql.DB
+	appStore    *store.Store
+	authSrv     *auth.Service
+	chatSrv     *chat.Service
+	presenceSrv *presence.Engine
+	push        *pushlet.Pushlet
+	mux         *http.ServeMux
+	stopOn      sync.Once
 }
 
 // NewApp opens the relay and application databases, constructs the pushlet
@@ -165,6 +167,7 @@ func NewApp(cfg Config) (*App, error) {
 		return nil, fmt.Errorf("distributed mode: %w", err)
 	}
 	app.chatSrv = chat.NewService(appStore, app.push, tpl)
+	app.presenceSrv = presence.NewEngine(app.push, presence.Config{})
 
 	app.mux = http.NewServeMux()
 	app.mountRoutes(staticRoot)
@@ -186,6 +189,9 @@ func (a *App) mountRoutes(staticRoot fs.FS) {
 	a.mux.Handle("/chat", a.authSrv.RequireAuth(http.HandlerFunc(a.chatSrv.HandleChatPage)))
 	a.mux.Handle("POST /api/messages", a.authSrv.RequireAuth(http.HandlerFunc(a.chatSrv.HandlePostMessage)))
 	a.mux.Handle("GET /api/messages", a.authSrv.RequireAuth(http.HandlerFunc(a.chatSrv.HandleListMessages)))
+	a.mux.Handle("POST /api/presence/join", a.authSrv.RequireAuth(http.HandlerFunc(a.presenceSrv.HandleJoin)))
+	a.mux.Handle("POST /api/presence/heartbeat", a.authSrv.RequireAuth(http.HandlerFunc(a.presenceSrv.HandleHeartbeat)))
+	a.mux.Handle("POST /api/leave", a.authSrv.RequireAuth(http.HandlerFunc(a.presenceSrv.HandleLeave)))
 	a.mux.Handle("GET /static/", http.StripPrefix("/static/", staticHandler(staticRoot)))
 	a.mux.HandleFunc("/", handleIndex)
 }
@@ -201,18 +207,21 @@ func staticHandler(root fs.FS) http.Handler {
 	})
 }
 
-// Start runs the pushlet broker and the relay fan-out goroutines. It must be
-// called after [NewApp] and before serving traffic; call it exactly once.
+// Start runs the pushlet broker, the relay fan-out goroutines, and the
+// presence sweeper. It must be called after [NewApp] and before serving
+// traffic; call it exactly once.
 func (a *App) Start() {
 	a.push.Start()
+	a.presenceSrv.Start()
 }
 
-// Stop shuts the pushlet instance down (broker, relay consumer, novaque
-// client, in that order) and then closes both databases. It is safe to call
-// more than once. Servers serving [App.Handler] must be shut down before
-// Stop so live streams drain first.
+// Stop shuts the presence sweeper, the pushlet instance (broker, relay
+// consumer, novaque client, in that order), and then closes both databases.
+// It is safe to call more than once. Servers serving [App.Handler] must be
+// shut down before Stop so live streams drain first.
 func (a *App) Stop() {
 	a.stopOn.Do(func() {
+		a.presenceSrv.Stop()
 		a.push.Stop()
 		_ = a.db.Close()
 		_ = a.appStore.Close()
@@ -267,6 +276,9 @@ func handleIndex(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintln(w, "  GET /api/me           the signed-in user (JSON)")
 	fmt.Fprintln(w, "  POST /api/messages    send a room message (JSON, session required)")
 	fmt.Fprintln(w, "  GET /api/messages     recent room history (JSON, ?after=id)")
+	fmt.Fprintln(w, "  POST /api/presence/join     announce yourself, get the online list")
+	fmt.Fprintln(w, "  POST /api/presence/heartbeat  keep your online entry alive")
+	fmt.Fprintln(w, "  POST /api/leave       leave the online list (sendBeacon-friendly)")
 	fmt.Fprintln(w, "  GET /static/...       embedded client assets")
 }
 
