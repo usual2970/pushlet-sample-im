@@ -19,6 +19,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/usual2970/pushlet"
 
+	"github.com/usual2970/sample-im/internal/auth"
 	"github.com/usual2970/sample-im/internal/presence"
 )
 
@@ -129,7 +130,7 @@ func TestAuthRoutesMountedThroughApp(t *testing.T) {
 	}
 	var session string
 	for _, c := range resp.Cookies() {
-		if c.Name == "sample_im_session" {
+		if c.Name == auth.SessionCookieName {
 			session = c.Value
 		}
 	}
@@ -141,7 +142,7 @@ func TestAuthRoutesMountedThroughApp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
-	req.AddCookie(&http.Cookie{Name: "sample_im_session", Value: session})
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: session})
 	chat, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("get /chat: %v", err)
@@ -291,7 +292,7 @@ func TestChatRoomEndToEndThroughRelay(t *testing.T) {
 	}
 	var session string
 	for _, c := range resp.Cookies() {
-		if c.Name == "sample_im_session" {
+		if c.Name == auth.SessionCookieName {
 			session = c.Value
 		}
 	}
@@ -314,7 +315,7 @@ func TestChatRoomEndToEndThroughRelay(t *testing.T) {
 		t.Fatalf("new request: %v", err)
 	}
 	post.Header.Set("Content-Type", "application/json")
-	post.AddCookie(&http.Cookie{Name: "sample_im_session", Value: session})
+	post.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: session})
 	postResp, err := http.DefaultClient.Do(post)
 	if err != nil {
 		t.Fatalf("post message: %v", err)
@@ -362,7 +363,7 @@ func TestChatRoomEndToEndThroughRelay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
-	hist.AddCookie(&http.Cookie{Name: "sample_im_session", Value: session})
+	hist.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: session})
 	histResp, err := http.DefaultClient.Do(hist)
 	if err != nil {
 		t.Fatalf("get history: %v", err)
@@ -550,7 +551,7 @@ func TestPresenceRoutesMountedThroughApp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new heartbeat: %v", err)
 	}
-	hb.AddCookie(&http.Cookie{Name: "sample_im_session", Value: cookie1})
+	hb.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: cookie1})
 	hbResp, err := http.DefaultClient.Do(hb)
 	if err != nil {
 		t.Fatalf("heartbeat: %v", err)
@@ -564,7 +565,7 @@ func TestPresenceRoutesMountedThroughApp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new leave: %v", err)
 	}
-	leave.AddCookie(&http.Cookie{Name: "sample_im_session", Value: cookie2})
+	leave.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: cookie2})
 	leaveResp, err := http.DefaultClient.Do(leave)
 	if err != nil {
 		t.Fatalf("leave: %v", err)
@@ -620,7 +621,7 @@ func TestPresenceJoinReachesSSESubscriberThroughRelay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new leave: %v", err)
 	}
-	leave.AddCookie(&http.Cookie{Name: "sample_im_session", Value: cookie})
+	leave.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: cookie})
 	leaveResp, err := http.DefaultClient.Do(leave)
 	if err != nil {
 		t.Fatalf("leave: %v", err)
@@ -664,7 +665,7 @@ func registerViaAPI(t *testing.T, ts *httptest.Server, username, password string
 		t.Fatalf("register %s status %d, want 200", username, resp.StatusCode)
 	}
 	for _, c := range resp.Cookies() {
-		if c.Name == "sample_im_session" {
+		if c.Name == auth.SessionCookieName {
 			session = c.Value
 		}
 	}
@@ -691,7 +692,7 @@ func joinPresence(t *testing.T, ts *httptest.Server, session string) presence.Sn
 	if err != nil {
 		t.Fatalf("new join: %v", err)
 	}
-	req.AddCookie(&http.Cookie{Name: "sample_im_session", Value: session})
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: session})
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("join: %v", err)
@@ -729,7 +730,6 @@ func idSuffix(id string) string {
 // sseStream reads one Server-Sent Events connection into parsed events.
 // All reads are bound by the context passed to openSSE.
 type sseStream struct {
-	body  io.ReadCloser
 	lines *bufio.Scanner
 }
 
@@ -752,7 +752,7 @@ func openSSE(t *testing.T, ctx context.Context, urlStr string) *sseStream {
 	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/event-stream") {
 		t.Fatalf("get %s: content type %q, want text/event-stream", urlStr, ct)
 	}
-	return &sseStream{body: resp.Body, lines: bufio.NewScanner(resp.Body)}
+	return &sseStream{lines: bufio.NewScanner(resp.Body)}
 }
 
 // next returns the next event/data pair on the stream, skipping heartbeat

@@ -105,7 +105,6 @@ func envOr(key, fallback string) string {
 // with [NewApp], serve [App.Handler], and always pair [App.Start] with
 // [App.Stop].
 type App struct {
-	cfg         Config
 	db          *sql.DB
 	appStore    *store.Store
 	authSrv     *auth.Service
@@ -155,7 +154,7 @@ func NewApp(cfg Config) (*App, error) {
 		return nil, fmt.Errorf("static assets: %w", err)
 	}
 
-	app := &App{cfg: cfg, db: db, appStore: appStore, authSrv: auth.NewService(appStore, tpl)}
+	app := &App{db: db, appStore: appStore, authSrv: auth.NewService(appStore, tpl)}
 
 	opts := pushlet.DefaultDistributedOptions()
 	if cfg.PollInterval > 0 {

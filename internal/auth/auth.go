@@ -69,7 +69,7 @@ func (s *Service) RequireAuth(next http.Handler) http.Handler {
 		user := s.resolveUser(r)
 		if user == nil {
 			if strings.HasPrefix(r.URL.Path, "/api/") {
-				writeError(w, http.StatusUnauthorized, "authentication required")
+				WriteError(w, http.StatusUnauthorized, "authentication required")
 				return
 			}
 			http.Redirect(w, r, "/login", http.StatusFound)
@@ -88,7 +88,7 @@ func (s *Service) HandleLoginPage(w http.ResponseWriter, r *http.Request) {
 	}
 	var buf bytes.Buffer
 	if err := s.tpl.ExecuteTemplate(&buf, loginTemplateName, nil); err != nil {
-		writeError(w, http.StatusInternalServerError, "could not render the login page")
+		WriteError(w, http.StatusInternalServerError, "could not render the login page")
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -105,22 +105,22 @@ func (s *Service) HandleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := validateCredentials(creds); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	user, err := s.store.Register(r.Context(), creds.Username, []byte(creds.Password))
 	switch {
 	case errors.Is(err, store.ErrPairExists):
-		writeError(w, http.StatusConflict, store.ErrPairExists.Error())
+		WriteError(w, http.StatusConflict, store.ErrPairExists.Error())
 		return
 	case err != nil:
-		writeError(w, http.StatusInternalServerError, "could not create the account")
+		WriteError(w, http.StatusInternalServerError, "could not create the account")
 		return
 	}
 
 	if err := s.startSession(w, r, user.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, "could not start a session")
+		WriteError(w, http.StatusInternalServerError, "could not start a session")
 		return
 	}
 	writeUser(w, user)
@@ -135,13 +135,13 @@ func (s *Service) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := validateCredentials(creds); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	users, err := s.store.UsersByName(r.Context(), creds.Username)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not look up the account")
+		WriteError(w, http.StatusInternalServerError, "could not look up the account")
 		return
 	}
 	var matched *store.User
@@ -152,12 +152,12 @@ func (s *Service) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if matched == nil {
-		writeError(w, http.StatusUnauthorized, ErrWrongCredentials.Error())
+		WriteError(w, http.StatusUnauthorized, ErrWrongCredentials.Error())
 		return
 	}
 
 	if err := s.startSession(w, r, matched.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, "could not start a session")
+		WriteError(w, http.StatusInternalServerError, "could not start a session")
 		return
 	}
 	writeUser(w, matched)
@@ -168,7 +168,7 @@ func (s *Service) HandleLogin(w http.ResponseWriter, r *http.Request) {
 func (s *Service) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(SessionCookieName); err == nil {
 		if err := s.store.DeleteSession(r.Context(), c.Value); err != nil {
-			writeError(w, http.StatusInternalServerError, "could not delete the session")
+			WriteError(w, http.StatusInternalServerError, "could not delete the session")
 			return
 		}
 	}
@@ -180,20 +180,20 @@ func (s *Service) HandleLogout(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   -1,
 	})
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 // HandleMe describes the signed-in user: their id, username, and dm_topic —
-// the private pushlet topic their browser subscribes to for direct messages
-// (KTD6). This is the only endpoint a dm secret ever reaches, and it reaches
+// the private pushlet topic their browser subscribes to for direct messages.
+// This is the only endpoint a dm secret ever reaches, and it reaches
 // only its owner; register and login replies carry just id and username.
 func (s *Service) HandleMe(w http.ResponseWriter, r *http.Request) {
 	user, ok := FromContext(r.Context())
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "authentication required")
+		WriteError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{
+	WriteJSON(w, http.StatusOK, map[string]string{
 		"id":       user.ID,
 		"username": user.Username,
 		"dm_topic": store.DMTopic(user.DMSecret),
@@ -241,7 +241,7 @@ type credentials struct {
 	Password string `json:"password"`
 }
 
-// decodeCredentials reads the JSON body and trims the username (R1: a name
+// decodeCredentials reads the JSON body and trims the username (a name
 // with padded whitespace registers under its trimmed form). On failure it has
 // already written the 400 response and reports false.
 func decodeCredentials(w http.ResponseWriter, r *http.Request) (credentials, bool) {
@@ -249,7 +249,7 @@ func decodeCredentials(w http.ResponseWriter, r *http.Request) (credentials, boo
 	var creds credentials
 	dec := json.NewDecoder(r.Body)
 	if err := dec.Decode(&creds); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		WriteError(w, http.StatusBadRequest, "invalid request body")
 		return credentials{}, false
 	}
 	creds.Username = strings.TrimSpace(creds.Username)
@@ -267,7 +267,7 @@ const maxPasswordBytes = 72
 // being buffered whole.
 const maxRequestBytes = 16 << 10
 
-// validateCredentials enforces the registration rules R1/R2 on a decoded
+// validateCredentials enforces the registration rules on a decoded
 // request: the username is trimmed and must be 1-32 characters of
 // [A-Za-z0-9_-]; the password must be 1-72 bytes. Login uses the same rules,
 // since accounts can only exist within them.
@@ -305,20 +305,20 @@ func validUsername(s string) bool {
 // writeUser answers with the JSON shape returned by register and login; the
 // richer /api/me shape (with the dm topic) is built by [Service.HandleMe].
 func writeUser(w http.ResponseWriter, user *store.User) {
-	writeJSON(w, http.StatusOK, map[string]string{
+	WriteJSON(w, http.StatusOK, map[string]string{
 		"id":       user.ID,
 		"username": user.Username,
 	})
 }
 
-// writeJSON writes v as a JSON response with the given status.
-func writeJSON(w http.ResponseWriter, status int, v any) {
+// WriteJSON writes v as a JSON response with the given status.
+func WriteJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// writeError writes {"error": message} with the given status.
-func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, map[string]string{"error": message})
+// WriteError writes {"error": message} with the given status.
+func WriteError(w http.ResponseWriter, status int, message string) {
+	WriteJSON(w, status, map[string]string{"error": message})
 }

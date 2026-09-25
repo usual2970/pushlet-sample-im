@@ -33,7 +33,7 @@ const DMTopicPrefix = "dm:"
 // DMTopic returns the pushlet topic carrying one user's direct messages:
 // the dm: prefix plus the account's dm secret. Only the owning browser
 // learns it, via /api/me; senders hand the server a user id and the server
-// resolves the topic from the account record (KTD6).
+// resolves the topic from the account record.
 func DMTopic(dmSecret string) string {
 	return DMTopicPrefix + dmSecret
 }
@@ -48,7 +48,7 @@ type User struct {
 }
 
 // schema is applied idempotently on every [Open]. The messages table is
-// created here already so chat (U3) and direct messages (U5) build on it
+// created here already so chat and direct messages build on it
 // without their own migration step.
 const schema = `
 CREATE TABLE IF NOT EXISTS users (
@@ -101,6 +101,7 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sqlite open: %w", err)
 	}
+	db.SetMaxOpenConns(10)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -129,6 +130,19 @@ func (s *Store) Close() error {
 // same-name comparison and the insert run under one lock so concurrent
 // registrations of the same pair cannot both succeed.
 func (s *Store) Register(ctx context.Context, username string, password []byte) (*User, error) {
+	s.regMu.Lock()
+	defer s.regMu.Unlock()
+
+	sameName, err := s.UsersByName(ctx, username)
+	if err != nil {
+		return nil, err
+	}
+	for i := range sameName {
+		if bcrypt.CompareHashAndPassword([]byte(sameName[i].PasswordHash), password) == nil {
+			return nil, ErrPairExists
+		}
+	}
+
 	hash, err := bcrypt.GenerateFromPassword(password, bcrypt.DefaultCost)
 	if err != nil {
 		return nil, fmt.Errorf("hash password: %w", err)
@@ -141,7 +155,6 @@ func (s *Store) Register(ctx context.Context, username string, password []byte) 
 	if err != nil {
 		return nil, fmt.Errorf("mint dm secret: %w", err)
 	}
-
 	user := &User{
 		ID:           id,
 		Username:     username,
@@ -149,30 +162,6 @@ func (s *Store) Register(ctx context.Context, username string, password []byte) 
 		DMSecret:     dmSecret,
 		CreatedAt:    time.Now().Unix(),
 	}
-
-	s.regMu.Lock()
-	defer s.regMu.Unlock()
-
-	rows, err := s.db.QueryContext(ctx, `SELECT password_hash FROM users WHERE username = ?`, username)
-	if err != nil {
-		return nil, fmt.Errorf("query same-name accounts: %w", err)
-	}
-	for rows.Next() {
-		var existing string
-		if err := rows.Scan(&existing); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("scan same-name account: %w", err)
-		}
-		if bcrypt.CompareHashAndPassword([]byte(existing), password) == nil {
-			rows.Close()
-			return nil, ErrPairExists
-		}
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return nil, fmt.Errorf("iterate same-name accounts: %w", err)
-	}
-	rows.Close()
 
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO users (id, username, password_hash, dm_secret, created_at)
@@ -223,8 +212,8 @@ func (s *Store) UserByID(ctx context.Context, id string) (*User, error) {
 }
 
 // Message is one stored chat message. Scope names the conversation the
-// message belongs to — the global room ("room", U3) or a direct-message
-// conversation (U5) — and ID is unique across the table.
+// message belongs to — the global room ("room") or a direct-message
+// conversation — and ID is unique across the table.
 type Message struct {
 	ID         int64
 	Scope      string

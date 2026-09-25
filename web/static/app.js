@@ -27,8 +27,6 @@ const dmList = document.getElementById('dm-list');
 
 let lastSeenId = 0;         // highest server message id rendered
 const seenIds = new Set();  // every server message id rendered
-let errorTimer = 0;
-let dmErrorTimer = 0;
 
 // ---- rendering ----
 
@@ -63,8 +61,38 @@ function messageRow(msg) {
   return row;
 }
 
-function nearBottom() {
-  return messagesList.scrollHeight - messagesList.scrollTop - messagesList.clientHeight < 120;
+function nearBottom(list) {
+  return list.scrollHeight - list.scrollTop - list.clientHeight < 120;
+}
+
+// mergeInto renders msg in list unless its id is already there, inserting it
+// in id order: drop any .empty placeholder, remember whether the list was
+// scrolled near the bottom, place the row before the first sibling carrying a
+// higher id (append when there is none), track the id in seen, and autoscroll
+// when the list was stuck to the bottom. isOwn flags the caller's own
+// messages for right alignment.
+function mergeInto(list, seen, msg, isOwn) {
+  if (!msg || !Number.isInteger(msg.id) || seen.has(msg.id)) return;
+
+  const emptyRow = list.querySelector('.empty');
+  if (emptyRow) emptyRow.remove();
+
+  const stick = nearBottom(list);
+  const row = messageRow(msg);
+  if (isOwn) row.classList.add('own');
+  let placed = false;
+  for (const sibling of list.children) {
+    const siblingId = Number(sibling.dataset ? sibling.dataset.id : NaN);
+    if (Number.isInteger(siblingId) && siblingId > msg.id) {
+      list.insertBefore(row, sibling);
+      placed = true;
+      break;
+    }
+  }
+  if (!placed) list.appendChild(row);
+
+  seen.add(msg.id);
+  if (stick) list.scrollTop = list.scrollHeight;
 }
 
 // mergeMessage renders msg unless its id is already on the page, inserting it
@@ -72,27 +100,8 @@ function nearBottom() {
 // backfill response that was in flight at the same time from double-rendering
 // the same message.
 function mergeMessage(msg) {
-  if (!msg || !Number.isInteger(msg.id) || seenIds.has(msg.id)) return;
-
-  const emptyRow = messagesList.querySelector('.empty');
-  if (emptyRow) emptyRow.remove();
-
-  const stick = nearBottom();
-  const row = messageRow(msg);
-  let placed = false;
-  for (const sibling of messagesList.children) {
-    const siblingId = Number(sibling.dataset ? sibling.dataset.id : NaN);
-    if (Number.isInteger(siblingId) && siblingId > msg.id) {
-      messagesList.insertBefore(row, sibling);
-      placed = true;
-      break;
-    }
-  }
-  if (!placed) messagesList.appendChild(row);
-
-  seenIds.add(msg.id);
-  if (msg.id > lastSeenId) lastSeenId = msg.id;
-  if (stick) messagesList.scrollTop = messagesList.scrollHeight;
+  mergeInto(messagesList, seenIds, msg, false);
+  if (msg && Number.isInteger(msg.id) && msg.id > lastSeenId) lastSeenId = msg.id;
 }
 
 // ---- seed from the server-rendered history ----
@@ -111,31 +120,24 @@ messagesList.scrollTop = messagesList.scrollHeight;
 
 const events = new EventSource('/events?topic=room');
 
+// parseEventData decodes one SSE event's JSON data, returning null when the
+// payload is not valid JSON; every consumer treats null as "ignore".
+function parseEventData(ev) {
+  try {
+    return JSON.parse(ev.data);
+  } catch (err) {
+    return null;
+  }
+}
+
 events.addEventListener('connected', () => {
   connBanner.hidden = true;
   backfill();
   joinPresence();
 });
 
-events.addEventListener('message', (ev) => {
-  let msg;
-  try {
-    msg = JSON.parse(ev.data);
-  } catch (err) {
-    return;
-  }
-  mergeMessage(msg);
-});
-
-events.addEventListener('presence', (ev) => {
-  let snapshot;
-  try {
-    snapshot = JSON.parse(ev.data);
-  } catch (err) {
-    return;
-  }
-  renderOnline(snapshot);
-});
+events.addEventListener('message', (ev) => { mergeMessage(parseEventData(ev)); });
+events.addEventListener('presence', (ev) => { renderOnline(parseEventData(ev)); });
 
 events.onerror = () => {
   // EventSource retries on its own; the banner stays up until the next
@@ -232,12 +234,20 @@ window.addEventListener('pagehide', leavePresence);
 
 // ---- composer ----
 
-function showError(text) {
-  composerError.textContent = text;
-  composerError.hidden = false;
-  clearTimeout(errorTimer);
-  errorTimer = setTimeout(() => { composerError.hidden = true; }, 4000);
+// makeErrorFlasher returns a show(text) function bound to one error element
+// and its own timer: the text shows now and hides again after four seconds,
+// with a rapid second error restarting the clock.
+function makeErrorFlasher(element) {
+  let timer = 0;
+  return (text) => {
+    element.textContent = text;
+    element.hidden = false;
+    clearTimeout(timer);
+    timer = setTimeout(() => { element.hidden = true; }, 4000);
+  };
 }
+
+const showError = makeErrorFlasher(composerError);
 
 composerForm.addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -312,15 +322,7 @@ function openDMStream(topic) {
     if (openPeer) loadConversation(openPeer);
   });
 
-  stream.addEventListener('message', (ev) => {
-    let msg;
-    try {
-      msg = JSON.parse(ev.data);
-    } catch (err) {
-      return;
-    }
-    routeDM(msg);
-  });
+  stream.addEventListener('message', (ev) => { routeDM(parseEventData(ev)); });
 }
 
 // routeDM derives the correspondent from one payload shape shared by both
@@ -408,27 +410,7 @@ function renderConversationList() {
 // already there, inserting in id order — same rules as mergeMessage. Own
 // messages align right.
 function mergeDM(msg) {
-  if (!msg || !Number.isInteger(msg.id) || dmPaneSeen.has(msg.id)) return;
-
-  const emptyRow = dmMessages.querySelector('.empty');
-  if (emptyRow) emptyRow.remove();
-
-  const stick = dmMessages.scrollHeight - dmMessages.scrollTop - dmMessages.clientHeight < 120;
-  const row = messageRow(msg);
-  if (me && msg.author_id === me.id) row.classList.add('own');
-  let placed = false;
-  for (const sibling of dmMessages.children) {
-    const siblingId = Number(sibling.dataset ? sibling.dataset.id : NaN);
-    if (Number.isInteger(siblingId) && siblingId > msg.id) {
-      dmMessages.insertBefore(row, sibling);
-      placed = true;
-      break;
-    }
-  }
-  if (!placed) dmMessages.appendChild(row);
-
-  dmPaneSeen.add(msg.id);
-  if (stick) dmMessages.scrollTop = dmMessages.scrollHeight;
+  mergeInto(dmMessages, dmPaneSeen, msg, Boolean(me && msg && msg.author_id === me.id));
 }
 
 // openConversation switches the DM pane to one correspondent: clears unread,
@@ -475,12 +457,7 @@ async function loadConversation(peer) {
   }
 }
 
-function showDMError(text) {
-  dmError.textContent = text;
-  dmError.hidden = false;
-  clearTimeout(dmErrorTimer);
-  dmErrorTimer = setTimeout(() => { dmError.hidden = true; }, 4000);
-}
+const showDMError = makeErrorFlasher(dmError);
 
 dmComposerForm.addEventListener('submit', async (event) => {
   event.preventDefault();

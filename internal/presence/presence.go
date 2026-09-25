@@ -1,5 +1,5 @@
-// Package presence implements sample-im's application-level online tracking
-// (KTD9): pushlet exports no connect/disconnect hooks, so the app owns
+// Package presence implements sample-im's application-level online tracking:
+// pushlet exports no connect/disconnect hooks, so the app owns
 // presence itself. Clients announce themselves on every stream (re)connect,
 // keep their entry alive with heartbeats, and bow out with a sendBeacon on
 // page unload; a sweeper goroutine expires whatever stopped beating, so a
@@ -8,7 +8,6 @@ package presence
 
 import (
 	"cmp"
-	"encoding/json"
 	"net/http"
 	"slices"
 	"sync"
@@ -40,7 +39,7 @@ type Publisher interface {
 // broadcast on the room topic and returned by the join endpoint. Name is the
 // account's username; Display is what the UI shows — the plain name, or
 // name#xxxx disambiguating one of several concurrently online users who
-// share that name (KTD5, computed server-side so every client agrees).
+// share that name, computed server-side so every client agrees.
 type User struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
@@ -280,17 +279,17 @@ func (e *Engine) publish(snap Snapshot) error {
 func (e *Engine) HandleJoin(w http.ResponseWriter, r *http.Request) {
 	user, ok := auth.FromContext(r.Context())
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "authentication required")
+		auth.WriteError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
 	snap, err := e.Join(user.ID, user.Username)
 	if err != nil {
 		// The entry stands (the next snapshot heals the room); only the live
 		// broadcast degraded — the same policy chat applies to messages.
-		writeError(w, http.StatusBadGateway, "joined but not broadcast; the list heals on the next update")
+		auth.WriteError(w, http.StatusBadGateway, "joined but not broadcast; the list heals on the next update")
 		return
 	}
-	writeJSON(w, http.StatusOK, snap)
+	auth.WriteJSON(w, http.StatusOK, snap)
 }
 
 // HandleHeartbeat serves POST /api/presence/heartbeat: it refreshes the
@@ -298,11 +297,11 @@ func (e *Engine) HandleJoin(w http.ResponseWriter, r *http.Request) {
 func (e *Engine) HandleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	user, ok := auth.FromContext(r.Context())
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "authentication required")
+		auth.WriteError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
 	e.Heartbeat(user.ID)
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	auth.WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 // HandleLeave serves POST /api/leave. It must work with
@@ -313,24 +312,12 @@ func (e *Engine) HandleHeartbeat(w http.ResponseWriter, r *http.Request) {
 func (e *Engine) HandleLeave(w http.ResponseWriter, r *http.Request) {
 	user, ok := auth.FromContext(r.Context())
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "authentication required")
+		auth.WriteError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
 	if _, err := e.Leave(user.ID); err != nil {
-		writeError(w, http.StatusBadGateway, "left but not broadcast; the list heals on the next update")
+		auth.WriteError(w, http.StatusBadGateway, "left but not broadcast; the list heals on the next update")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
-}
-
-// writeJSON writes v as a JSON response with the given status.
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-// writeError writes {"error": message} with the given status.
-func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, map[string]string{"error": message})
+	auth.WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }

@@ -19,8 +19,8 @@ import (
 )
 
 // RoomTopic is the fixed pushlet topic every global-room message is
-// published to; RoomScope is the matching messages-table scope. U4 (presence)
-// and U5 (direct messages) use their own separate topics and scopes.
+// published to; RoomScope is the matching messages-table scope. Presence and
+// direct messages use their own separate topics and scopes.
 const (
 	RoomTopic = "room"
 	RoomScope = "room"
@@ -87,7 +87,7 @@ type chatPage struct {
 	Messages []Message
 }
 
-// HandleChatPage serves the room page (R13): the signed-in user's name in
+// HandleChatPage serves the room page: the signed-in user's name in
 // the header, the most recent room messages rendered server-side through
 // html/template's contextual autoescaping, and the shell (composer,
 // reconnect banner, online-list container) the client script wires up.
@@ -117,13 +117,13 @@ func (s *Service) HandleChatPage(w http.ResponseWriter, r *http.Request) {
 // HandlePostMessage accepts JSON {body}, validates and trims it to
 // 1..2000 bytes, stamps the authenticated author and time, persists the
 // message under the room scope, and broadcasts it on the room topic. The
-// publish is synchronous (KTD8): the 201 reply is written only after the
+// publish is synchronous: the 201 reply is written only after the
 // relay accepted the message, and it carries the same payload subscribers
 // receive.
 func (s *Service) HandlePostMessage(w http.ResponseWriter, r *http.Request) {
 	user, ok := auth.FromContext(r.Context())
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "authentication required")
+		auth.WriteError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
@@ -131,22 +131,22 @@ func (s *Service) HandlePostMessage(w http.ResponseWriter, r *http.Request) {
 		Body string `json:"body"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		auth.WriteError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	body := strings.TrimSpace(req.Body)
 	switch {
 	case body == "":
-		writeError(w, http.StatusBadRequest, "message body is required")
+		auth.WriteError(w, http.StatusBadRequest, "message body is required")
 		return
 	case len(body) > maxBodyBytes:
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("message body must be at most %d bytes", maxBodyBytes))
+		auth.WriteError(w, http.StatusBadRequest, fmt.Sprintf("message body must be at most %d bytes", maxBodyBytes))
 		return
 	}
 
 	stored, err := s.store.AppendMessage(r.Context(), RoomScope, user.ID, user.Username, body, time.Now().Unix())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not save the message")
+		auth.WriteError(w, http.StatusInternalServerError, "could not save the message")
 		return
 	}
 	msg := Message{
@@ -159,15 +159,15 @@ func (s *Service) HandlePostMessage(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.pub.PublishJSON(RoomTopic, messageEvent, msg); err != nil {
 		// Publish-failure policy: the row stays. The messages table is the
-		// room's durable history (R6/AE5), and every client heals a missed
+		// room's durable history, and every client heals a missed
 		// broadcast by refetching /api/messages?after=<last seen id> when
 		// its stream reconnects — deleting the row here would destroy an
 		// accepted message that the backfill still delivers. The 502 tells
 		// the sender only that the live broadcast degraded.
-		writeError(w, http.StatusBadGateway, "message saved but not broadcast; it will appear on reconnect")
+		auth.WriteError(w, http.StatusBadGateway, "message saved but not broadcast; it will appear on reconnect")
 		return
 	}
-	writeJSON(w, http.StatusCreated, msg)
+	auth.WriteJSON(w, http.StatusCreated, msg)
 }
 
 // HandleListMessages answers GET /api/messages?after=<id> with the room's
@@ -177,24 +177,24 @@ func (s *Service) HandlePostMessage(w http.ResponseWriter, r *http.Request) {
 // clients backfill with.
 func (s *Service) HandleListMessages(w http.ResponseWriter, r *http.Request) {
 	if _, ok := auth.FromContext(r.Context()); !ok {
-		writeError(w, http.StatusUnauthorized, "authentication required")
+		auth.WriteError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
 	after := int64(0)
 	if raw := r.URL.Query().Get("after"); raw != "" {
 		v, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil || v < 0 {
-			writeError(w, http.StatusBadRequest, "after must be a non-negative message id")
+			auth.WriteError(w, http.StatusBadRequest, "after must be a non-negative message id")
 			return
 		}
 		after = v
 	}
 	rows, err := s.store.RecentMessages(r.Context(), RoomScope, after, historyLimit)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not load the room history")
+		auth.WriteError(w, http.StatusInternalServerError, "could not load the room history")
 		return
 	}
-	writeJSON(w, http.StatusOK, toWire(rows))
+	auth.WriteJSON(w, http.StatusOK, toWire(rows))
 }
 
 // toWire maps stored rows onto the wire shape; it keeps the result non-nil
@@ -211,16 +211,4 @@ func toWire(rows []store.Message) []Message {
 		})
 	}
 	return messages
-}
-
-// writeJSON writes v as a JSON response with the given status.
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-// writeError writes {"error": message} with the given status.
-func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, map[string]string{"error": message})
 }

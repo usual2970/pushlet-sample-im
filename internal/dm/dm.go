@@ -1,5 +1,5 @@
-// Package dm implements sample-im's one-to-one direct messages (R8): every
-// user owns a private pushlet topic derived from their dm secret (KTD6), and
+// Package dm implements sample-im's one-to-one direct messages: every
+// user owns a private pushlet topic derived from their dm secret, and
 // the server resolves a recipient's topic from their account record — senders
 // only ever hand over a user id. Each DM is persisted first under the pair's
 // conversation scope, then published to the recipient's topic and to the
@@ -86,12 +86,12 @@ func NewService(st *store.Store, pub Publisher, online Presence) *Service {
 // message under the pair's conversation scope with the author stamped, then
 // publishes the payload to the recipient's private dm topic and to the
 // sender's own (the sender renders their copy from their stream). The
-// publishes are synchronous (KTD8); the 201 reply carries the same payload
+// publishes are synchronous; the 201 reply carries the same payload
 // subscribers receive.
 func (s *Service) HandleSend(w http.ResponseWriter, r *http.Request) {
 	user, ok := auth.FromContext(r.Context())
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "authentication required")
+		auth.WriteError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
@@ -100,40 +100,40 @@ func (s *Service) HandleSend(w http.ResponseWriter, r *http.Request) {
 		Body string `json:"body"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		auth.WriteError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	req.To = strings.TrimSpace(req.To)
 	body := strings.TrimSpace(req.Body)
 	switch {
 	case req.To == "":
-		writeError(w, http.StatusBadRequest, "recipient is required")
+		auth.WriteError(w, http.StatusBadRequest, "recipient is required")
 		return
 	case body == "":
-		writeError(w, http.StatusBadRequest, "message body is required")
+		auth.WriteError(w, http.StatusBadRequest, "message body is required")
 		return
 	case len(body) > maxBodyBytes:
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("message body must be at most %d bytes", maxBodyBytes))
+		auth.WriteError(w, http.StatusBadRequest, fmt.Sprintf("message body must be at most %d bytes", maxBodyBytes))
 		return
 	}
 
 	recipient, err := s.store.UserByID(r.Context(), req.To)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not look up the recipient")
+		auth.WriteError(w, http.StatusInternalServerError, "could not look up the recipient")
 		return
 	}
 	if recipient == nil {
-		writeError(w, http.StatusNotFound, "recipient not found")
+		auth.WriteError(w, http.StatusNotFound, "recipient not found")
 		return
 	}
 	if !s.online.IsOnline(recipient.ID) {
-		writeError(w, http.StatusConflict, "recipient is offline; pick someone from the online list")
+		auth.WriteError(w, http.StatusConflict, "recipient is offline; pick someone from the online list")
 		return
 	}
 
 	stored, err := s.store.AppendMessage(r.Context(), conversationScope(user.ID, recipient.ID), user.ID, user.Username, body, time.Now().Unix())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not save the message")
+		auth.WriteError(w, http.StatusInternalServerError, "could not save the message")
 		return
 	}
 	msg := Message{
@@ -150,14 +150,14 @@ func (s *Service) HandleSend(w http.ResponseWriter, r *http.Request) {
 	// when a publish fails (the conversation history still delivers it),
 	// mirroring the room's policy.
 	if err := s.pub.PublishJSON(store.DMTopic(recipient.DMSecret), messageEvent, msg); err != nil {
-		writeError(w, http.StatusBadGateway, "message saved but not broadcast; it will appear when the conversation is opened")
+		auth.WriteError(w, http.StatusBadGateway, "message saved but not broadcast; it will appear when the conversation is opened")
 		return
 	}
 	if err := s.pub.PublishJSON(store.DMTopic(user.DMSecret), messageEvent, msg); err != nil {
-		writeError(w, http.StatusBadGateway, "message saved but not broadcast; it will appear when the conversation is opened")
+		auth.WriteError(w, http.StatusBadGateway, "message saved but not broadcast; it will appear when the conversation is opened")
 		return
 	}
-	writeJSON(w, http.StatusCreated, msg)
+	auth.WriteJSON(w, http.StatusCreated, msg)
 }
 
 // HandleHistory answers GET /api/dm?with=<user id> with the conversation
@@ -169,29 +169,29 @@ func (s *Service) HandleSend(w http.ResponseWriter, r *http.Request) {
 func (s *Service) HandleHistory(w http.ResponseWriter, r *http.Request) {
 	user, ok := auth.FromContext(r.Context())
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "authentication required")
+		auth.WriteError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
 	with := strings.TrimSpace(r.URL.Query().Get("with"))
 	if with == "" {
-		writeError(w, http.StatusBadRequest, "with is required (the other user's id)")
+		auth.WriteError(w, http.StatusBadRequest, "with is required (the other user's id)")
 		return
 	}
 	peer, err := s.store.UserByID(r.Context(), with)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not look up the user")
+		auth.WriteError(w, http.StatusInternalServerError, "could not look up the user")
 		return
 	}
 	if peer == nil {
-		writeError(w, http.StatusNotFound, "user not found")
+		auth.WriteError(w, http.StatusNotFound, "user not found")
 		return
 	}
 	rows, err := s.store.RecentMessages(r.Context(), conversationScope(user.ID, peer.ID), 0, historyLimit)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not load the conversation")
+		auth.WriteError(w, http.StatusInternalServerError, "could not load the conversation")
 		return
 	}
-	writeJSON(w, http.StatusOK, toWire(rows, [2]string{user.ID, peer.ID}))
+	auth.WriteJSON(w, http.StatusOK, toWire(rows, [2]string{user.ID, peer.ID}))
 }
 
 // HandleUser answers GET /api/users/{id} with the minimal public info DM
@@ -200,19 +200,19 @@ func (s *Service) HandleHistory(w http.ResponseWriter, r *http.Request) {
 // secret, ever leaves this handler.
 func (s *Service) HandleUser(w http.ResponseWriter, r *http.Request) {
 	if _, ok := auth.FromContext(r.Context()); !ok {
-		writeError(w, http.StatusUnauthorized, "authentication required")
+		auth.WriteError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
 	user, err := s.store.UserByID(r.Context(), r.PathValue("id"))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not look up the user")
+		auth.WriteError(w, http.StatusInternalServerError, "could not look up the user")
 		return
 	}
 	if user == nil {
-		writeError(w, http.StatusNotFound, "user not found")
+		auth.WriteError(w, http.StatusNotFound, "user not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{
+	auth.WriteJSON(w, http.StatusOK, map[string]string{
 		"id":           user.ID,
 		"username":     user.Username,
 		"display_name": user.Username,
@@ -256,16 +256,4 @@ func toWire(rows []store.Message, pair [2]string) []Message {
 		})
 	}
 	return messages
-}
-
-// writeJSON writes v as a JSON response with the given status.
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-// writeError writes {"error": message} with the given status.
-func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, map[string]string{"error": message})
 }
