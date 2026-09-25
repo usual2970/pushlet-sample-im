@@ -1,0 +1,11 @@
+# Local runtime state (SQLite relay database).
+data/
+
+# Binaries.
+/sample-im
+*.exe
+
+# Standard Go tooling output.
+*.test
+*.out
+coverage.txt
