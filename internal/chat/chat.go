@@ -18,14 +18,6 @@ import (
 	"github.com/usual2970/sample-im/internal/store"
 )
 
-// RoomTopic is the fixed pushlet topic every global-room message is
-// published to; RoomScope is the matching messages-table scope. Presence and
-// direct messages use their own separate topics and scopes.
-const (
-	RoomTopic = "room"
-	RoomScope = "room"
-)
-
 // messageEvent is the pushlet event name carried by room messages. The
 // browser's EventSource dispatches it to its "message" listener.
 const messageEvent = "message"
@@ -97,7 +89,7 @@ func (s *Service) HandleChatPage(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/login", http.StatusFound)
 		return
 	}
-	rows, err := s.store.RecentMessages(r.Context(), RoomScope, 0, historyLimit)
+	rows, err := s.store.RecentMessages(r.Context(), store.RoomScope, 0, historyLimit)
 	if err != nil {
 		http.Error(w, "could not load the room history", http.StatusInternalServerError)
 		return
@@ -144,7 +136,7 @@ func (s *Service) HandlePostMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stored, err := s.store.AppendMessage(r.Context(), RoomScope, user.ID, user.Username, body, time.Now().Unix())
+	stored, err := s.store.AppendMessage(r.Context(), store.RoomScope, user.ID, user.Username, body, time.Now().Unix())
 	if err != nil {
 		auth.WriteError(w, http.StatusInternalServerError, "could not save the message")
 		return
@@ -157,7 +149,7 @@ func (s *Service) HandlePostMessage(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:  stored.CreatedAt,
 	}
 
-	if err := s.pub.PublishJSON(RoomTopic, messageEvent, msg); err != nil {
+	if err := s.pub.PublishJSON(store.RoomTopic, messageEvent, msg); err != nil {
 		// Publish-failure policy: the row stays. The messages table is the
 		// room's durable history, and every client heals a missed
 		// broadcast by refetching /api/messages?after=<last seen id> when
@@ -189,7 +181,7 @@ func (s *Service) HandleListMessages(w http.ResponseWriter, r *http.Request) {
 		}
 		after = v
 	}
-	rows, err := s.store.RecentMessages(r.Context(), RoomScope, after, historyLimit)
+	rows, err := s.store.RecentMessages(r.Context(), store.RoomScope, after, historyLimit)
 	if err != nil {
 		auth.WriteError(w, http.StatusInternalServerError, "could not load the room history")
 		return

@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/usual2970/sample-im/internal/auth"
-	"github.com/usual2970/sample-im/internal/chat"
 	"github.com/usual2970/sample-im/internal/store"
 )
 
@@ -123,7 +122,7 @@ func newFixture(t *testing.T, e *Engine, capture *capturePublisher) *fixture {
 	mux := http.NewServeMux()
 	mux.Handle("POST /api/presence/join", authSvc.RequireAuth(http.HandlerFunc(e.HandleJoin)))
 	mux.Handle("POST /api/presence/heartbeat", authSvc.RequireAuth(http.HandlerFunc(e.HandleHeartbeat)))
-	mux.Handle("POST /api/leave", authSvc.RequireAuth(http.HandlerFunc(e.HandleLeave)))
+	mux.Handle("POST /api/presence/leave", authSvc.RequireAuth(http.HandlerFunc(e.HandleLeave)))
 	fx := &fixture{store: st, engine: e, ts: httptest.NewServer(mux), capture: capture}
 	t.Cleanup(fx.ts.Close)
 	return fx
@@ -216,8 +215,8 @@ func TestSweepExpiresStaleEntriesAndPublishes(t *testing.T) {
 		t.Fatalf("sweep published %d snapshots, want 1 more", n-1)
 	}
 	last := publishes[1]
-	if last.topic != chat.RoomTopic {
-		t.Fatalf("snapshot published to topic %q, want %q", last.topic, chat.RoomTopic)
+	if last.topic != store.RoomTopic {
+		t.Fatalf("snapshot published to topic %q, want %q", last.topic, store.RoomTopic)
 	}
 	if last.event != "presence" {
 		t.Fatalf("snapshot event %q, want %q", last.event, "presence")
@@ -545,7 +544,7 @@ func TestUnauthenticatedRequestsRejected(t *testing.T) {
 	e := NewEngine(pub, Config{})
 	fx := newFixture(t, e, pub)
 
-	for _, path := range []string{"/api/presence/join", "/api/presence/heartbeat", "/api/leave"} {
+	for _, path := range []string{"/api/presence/join", "/api/presence/heartbeat", "/api/presence/leave"} {
 		status, body := postPath(t, fx.ts, path, "", "")
 		if status != http.StatusUnauthorized {
 			t.Fatalf("anonymous POST %s status %d, want 401", path, status)
@@ -598,7 +597,7 @@ func TestHandlersServeBeaconShapedRequests(t *testing.T) {
 	}
 
 	// Beacon-shaped leave: empty body, no Content-Type, cookie only.
-	status, body = postPath(t, fx.ts, "/api/leave", token2, "")
+	status, body = postPath(t, fx.ts, "/api/presence/leave", token2, "")
 	if status != http.StatusOK {
 		t.Fatalf("leave status %d (%s), want 200", status, body)
 	}
@@ -671,7 +670,7 @@ func TestJoinPublishFailureAnswers502(t *testing.T) {
 	}
 
 	// Leave with the relay still down: removal stands, 502 reported.
-	status, _ = postPath(t, fx.ts, "/api/leave", token, "")
+	status, _ = postPath(t, fx.ts, "/api/presence/leave", token, "")
 	if status != http.StatusBadGateway {
 		t.Fatalf("leave status %d, want 502", status)
 	}

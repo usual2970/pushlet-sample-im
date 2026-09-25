@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/usual2970/sample-im/internal/auth"
-	"github.com/usual2970/sample-im/internal/chat"
+	"github.com/usual2970/sample-im/internal/store"
 )
 
 // presenceEvent is the pushlet event name every presence snapshot is
@@ -291,7 +291,7 @@ func idSuffix(id string) string {
 
 // publish broadcasts one snapshot on the room topic.
 func (e *Engine) publish(snap Snapshot) error {
-	return e.pub.PublishJSON(chat.RoomTopic, presenceEvent, snap)
+	return e.pub.PublishJSON(store.RoomTopic, presenceEvent, snap)
 }
 
 // HandleJoin serves POST /api/presence/join: it records the caller, refreshes
@@ -333,7 +333,7 @@ func (e *Engine) HandleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	auth.WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-// HandleLeave serves POST /api/leave. It must work with
+// HandleLeave serves POST /api/presence/leave. It must work with
 // navigator.sendBeacon: beacons are plain same-origin POSTs whose cookies
 // are sent, whose body is typically empty, and whose response nobody reads
 // — so this handler never touches the request body and always answers

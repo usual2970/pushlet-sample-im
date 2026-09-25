@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"embed"
@@ -187,22 +188,98 @@ func (a *App) mountRoutes(staticRoot fs.FS) {
 	a.mux.HandleFunc("/health", handleHealth)
 	a.mux.HandleFunc("/events", a.push.HandleSSE)
 	a.mux.HandleFunc("/ws", a.push.HandleWebsocket)
-	a.mux.HandleFunc("/api/register", a.authSrv.HandleRegister)
-	a.mux.HandleFunc("/api/login", a.authSrv.HandleLogin)
-	a.mux.Handle("/api/logout", a.authSrv.RequireAuth(http.HandlerFunc(a.authSrv.HandleLogout)))
-	a.mux.Handle("/api/me", a.authSrv.RequireAuth(http.HandlerFunc(a.authSrv.HandleMe)))
 	a.mux.HandleFunc("/login", a.authSrv.HandleLoginPage)
 	a.mux.Handle("/chat", a.authSrv.RequireAuth(http.HandlerFunc(a.chatSrv.HandleChatPage)))
-	a.mux.Handle("POST /api/messages", a.authSrv.RequireAuth(http.HandlerFunc(a.chatSrv.HandlePostMessage)))
-	a.mux.Handle("GET /api/messages", a.authSrv.RequireAuth(http.HandlerFunc(a.chatSrv.HandleListMessages)))
-	a.mux.Handle("POST /api/presence/join", a.authSrv.RequireAuth(http.HandlerFunc(a.presenceSrv.HandleJoin)))
-	a.mux.Handle("POST /api/presence/heartbeat", a.authSrv.RequireAuth(http.HandlerFunc(a.presenceSrv.HandleHeartbeat)))
-	a.mux.Handle("POST /api/leave", a.authSrv.RequireAuth(http.HandlerFunc(a.presenceSrv.HandleLeave)))
-	a.mux.Handle("POST /api/dm", a.authSrv.RequireAuth(http.HandlerFunc(a.dmSrv.HandleSend)))
-	a.mux.Handle("GET /api/dm", a.authSrv.RequireAuth(http.HandlerFunc(a.dmSrv.HandleHistory)))
-	a.mux.Handle("GET /api/users/{id}", a.authSrv.RequireAuth(http.HandlerFunc(a.dmSrv.HandleUser)))
 	a.mux.Handle("GET /static/", http.StripPrefix("/static/", staticHandler(staticRoot)))
 	a.mux.HandleFunc("/", handleIndex)
+
+	// The /api/* subtree lives on its own mux where every route carries a
+	// method pattern: ServeMux then answers a request whose path matches a
+	// route but whose verb does not with a built-in 405 plus Allow header,
+	// so a cross-site top-level GET to /api/logout can no longer delete the
+	// session (logout CSRF under SameSite=Lax cookies). The subtree must be
+	// its own mux for that: on the main mux the "/" index pattern would
+	// swallow every unmatched /api request. Both built-ins are text/plain,
+	// which would break the JSON envelope every other /api answer uses, so
+	// apiJSONErrors re-renders them.
+	api := http.NewServeMux()
+	api.HandleFunc("POST /api/register", a.authSrv.HandleRegister)
+	api.HandleFunc("POST /api/login", a.authSrv.HandleLogin)
+	api.Handle("POST /api/logout", a.authSrv.RequireAuth(http.HandlerFunc(a.authSrv.HandleLogout)))
+	api.Handle("GET /api/me", a.authSrv.RequireAuth(http.HandlerFunc(a.authSrv.HandleMe)))
+	api.Handle("POST /api/messages", a.authSrv.RequireAuth(http.HandlerFunc(a.chatSrv.HandlePostMessage)))
+	api.Handle("GET /api/messages", a.authSrv.RequireAuth(http.HandlerFunc(a.chatSrv.HandleListMessages)))
+	api.Handle("POST /api/presence/join", a.authSrv.RequireAuth(http.HandlerFunc(a.presenceSrv.HandleJoin)))
+	api.Handle("POST /api/presence/heartbeat", a.authSrv.RequireAuth(http.HandlerFunc(a.presenceSrv.HandleHeartbeat)))
+	api.Handle("POST /api/presence/leave", a.authSrv.RequireAuth(http.HandlerFunc(a.presenceSrv.HandleLeave)))
+	api.Handle("POST /api/dm", a.authSrv.RequireAuth(http.HandlerFunc(a.dmSrv.HandleSend)))
+	api.Handle("GET /api/dm", a.authSrv.RequireAuth(http.HandlerFunc(a.dmSrv.HandleHistory)))
+	api.Handle("GET /api/users/{id}", a.authSrv.RequireAuth(http.HandlerFunc(a.dmSrv.HandleUser)))
+	a.mux.Handle("/api/", apiJSONErrors(api))
+}
+
+// apiJSONErrors wraps the /api/* route mux so its built-in 404 and 405
+// answers render in the {"error":...} envelope every other /api handler
+// uses, instead of ServeMux's text/plain bodies. The status and the Allow
+// header the mux sets on 405s pass through unchanged.
+func apiJSONErrors(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec := &bufferedResponse{header: w.Header()}
+		next.ServeHTTP(rec, r)
+		switch rec.status {
+		case http.StatusNotFound:
+			auth.WriteError(w, http.StatusNotFound, "no such endpoint")
+		case http.StatusMethodNotAllowed:
+			auth.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+		default:
+			rec.replay(w)
+		}
+	})
+}
+
+// bufferedResponse records one response's status code and body without
+// touching the client connection, so a 404/405 produced by the wrapped mux
+// can be re-rendered as JSON after the fact. Every /api response is a small
+// JSON document — nothing under /api streams — so buffering them costs
+// nothing. A handler that writes nothing leaves the status zero and the body
+// empty, which replay treats as "let Go write its own empty 200".
+type bufferedResponse struct {
+	header http.Header
+	status int
+	body   bytes.Buffer
+}
+
+// Header returns the wrapped response's header map, so headers the wrapped
+// handler sets (Content-Type, Allow, Set-Cookie) land on the real response.
+func (b *bufferedResponse) Header() http.Header { return b.header }
+
+// WriteHeader records the status instead of sending it; only the first one
+// counts, mirroring net/http's own rule.
+func (b *bufferedResponse) WriteHeader(status int) {
+	if b.status == 0 {
+		b.status = status
+	}
+}
+
+// Write records the body, implying a 200 status when none was written.
+func (b *bufferedResponse) Write(p []byte) (int, error) {
+	if b.status == 0 {
+		b.status = http.StatusOK
+	}
+	return b.body.Write(p)
+}
+
+// replay sends the recorded status and body to w.
+func (b *bufferedResponse) replay(w http.ResponseWriter) {
+	if b.status == 0 && b.body.Len() == 0 {
+		return
+	}
+	if b.status != 0 {
+		w.WriteHeader(b.status)
+	}
+	if b.body.Len() > 0 {
+		_, _ = w.Write(b.body.Bytes())
+	}
 }
 
 // staticHandler serves the embedded client assets. Responses carry
@@ -287,7 +364,7 @@ func handleIndex(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintln(w, "  GET /api/messages     recent room history (JSON, ?after=id)")
 	fmt.Fprintln(w, "  POST /api/presence/join     announce yourself, get the online list")
 	fmt.Fprintln(w, "  POST /api/presence/heartbeat  keep your online entry alive")
-	fmt.Fprintln(w, "  POST /api/leave       leave the online list (sendBeacon-friendly)")
+	fmt.Fprintln(w, "  POST /api/presence/leave    leave the online list (sendBeacon-friendly)")
 	fmt.Fprintln(w, "  POST /api/dm          send a direct message (JSON, recipient must be online)")
 	fmt.Fprintln(w, "  GET /api/dm?with=id   your direct-message history with that user")
 	fmt.Fprintln(w, "  GET /api/users/<id>   a user's public name (for DM headers)")
@@ -298,9 +375,12 @@ func handleIndex(w http.ResponseWriter, _ *http.Request) {
 const redactedTopic = "dm:***"
 
 // newRedactingLogger returns the [pushlet.Logger] factory used for the whole
-// service. Everything passes through to the standard logger except that any
-// "topic" field whose value starts with dm: is logged as dm:***, keeping
-// conversation names out of logs.
+// service. Everything passes through to the standard logger except that dm:
+// topics never reach it: any "topic" field whose value starts with dm: is
+// logged as dm:***, and any raw message operand embedding a dm: topic —
+// pushlet's WebSocket read path logs received command lines like
+// "SUB dm:<secret>" as operands, not fields — is truncated at the prefix the
+// same way, keeping conversation names out of logs.
 func newRedactingLogger() pushlet.Logger {
 	return &redactingLogger{fields: map[string]any{}}
 }
@@ -312,9 +392,45 @@ type redactingLogger struct {
 	fields map[string]any
 }
 
-// Println writes the redacted fields followed by v to the standard logger.
+// Println writes the redacted fields followed by v to the standard logger,
+// scrubbing dm: topics out of the message operands as well as the fields.
 func (l *redactingLogger) Println(v ...any) {
-	log.Println(append(l.prefix(), v...)...)
+	log.Println(append(l.prefix(), redactOperands(v)...)...)
+}
+
+// redactOperands returns v with every string or []byte operand that embeds a
+// dm: topic rewritten to stop at the prefix: "SUB dm:<secret>" becomes
+// "SUB dm:***". Everything from the prefix onward was topic material, so all
+// of it goes. The input slice is never mutated; a copy is made only when
+// some operand actually needs redacting.
+func redactOperands(v []any) []any {
+	var out []any // nil until the first redaction forces a copy
+	for i, op := range v {
+		var redacted string
+		switch s := op.(type) {
+		case string:
+			if j := strings.Index(s, store.DMTopicPrefix); j >= 0 {
+				redacted = s[:j] + redactedTopic
+			}
+		case []byte:
+			if j := bytes.Index(s, []byte(store.DMTopicPrefix)); j >= 0 {
+				redacted = string(s[:j]) + redactedTopic
+			}
+		default:
+			continue
+		}
+		if redacted == "" {
+			continue // operand carried no dm: topic
+		}
+		if out == nil {
+			out = slices.Clone(v)
+		}
+		out[i] = redacted
+	}
+	if out == nil {
+		return v
+	}
+	return out
 }
 
 // WithField returns a new logger with key set to value, leaving the

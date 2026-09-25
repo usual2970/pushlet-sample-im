@@ -226,11 +226,11 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // Leaving: navigator.sendBeacon issues a plain same-origin POST with the
-// session cookie attached and no body to read, which /api/leave accepts.
-// Both unload events can fire for one navigation; the server treats a
-// duplicate beacon as a no-op, so sending from both is safe.
+// session cookie attached and no body to read, which /api/presence/leave
+// accepts. Both unload events can fire for one navigation; the server treats
+// a duplicate beacon as a no-op, so sending from both is safe.
 function leavePresence() {
-  if (navigator.sendBeacon) navigator.sendBeacon('/api/leave');
+  if (navigator.sendBeacon) navigator.sendBeacon('/api/presence/leave');
 }
 window.addEventListener('beforeunload', leavePresence);
 window.addEventListener('pagehide', leavePresence);

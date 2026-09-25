@@ -113,6 +113,60 @@ func TestIndexRoute(t *testing.T) {
 	}
 }
 
+// TestAPIMethodPatternsAndJSONErrors pins the method-pattern mounts: a
+// request whose path matches an /api route but whose verb does not is
+// answered by the mux's built-in 405 — Allow header intact — instead of
+// running the handler, so a cross-site top-level GET can no longer log the
+// user out (logout CSRF under SameSite=Lax cookies). Both that 405 and the
+// 404 for an unknown /api path render in the JSON envelope every other /api
+// answer uses, never the mux's text/plain bodies or the index page.
+func TestAPIMethodPatternsAndJSONErrors(t *testing.T) {
+	_, ts := newTestApp(t)
+
+	// GET /api/logout: only POST is registered.
+	resp, err := http.Get(ts.URL + "/api/logout")
+	if err != nil {
+		t.Fatalf("get /api/logout: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /api/logout status %d, want 405", resp.StatusCode)
+	}
+	if allow := resp.Header.Get("Allow"); !strings.Contains(allow, http.MethodPost) {
+		t.Fatalf("405 Allow header %q, want it to advertise POST", allow)
+	}
+	assertJSONErrorBody(t, resp)
+
+	// An unknown /api path is a 404 in the same envelope.
+	nope, err := http.Get(ts.URL + "/api/nope")
+	if err != nil {
+		t.Fatalf("get /api/nope: %v", err)
+	}
+	defer nope.Body.Close()
+	if nope.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET /api/nope status %d, want 404", nope.StatusCode)
+	}
+	assertJSONErrorBody(t, nope)
+}
+
+// assertJSONErrorBody fails the test unless resp carries the /api error
+// envelope: a JSON content type and a non-empty error message.
+func assertJSONErrorBody(t *testing.T, resp *http.Response) {
+	t.Helper()
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Fatalf("%s %s: content type %q, want the JSON envelope", resp.Request.Method, resp.Request.URL.Path, ct)
+	}
+	var body struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("%s %s: decode error body: %v", resp.Request.Method, resp.Request.URL.Path, err)
+	}
+	if body.Error == "" {
+		t.Fatalf("%s %s: error body carries no message", resp.Request.Method, resp.Request.URL.Path)
+	}
+}
+
 // TestAuthRoutesMountedThroughApp proves the auth surface (U2) is wired into
 // the whole App: registering through the API sets a cookie that carries an
 // authenticated request through the middleware to the /chat page.
@@ -494,6 +548,57 @@ func TestRedactingLoggerRedactsDMTopics(t *testing.T) {
 	}
 }
 
+// TestRedactingLoggerScrubsRawOperands pins the operand half of the redaction
+// contract: pushlet's WebSocket read loop logs received command lines as
+// Println operands ("Received command:", "SUB dm:<secret>") rather than
+// fields, so those must be scrubbed too — everything from the dm: prefix
+// onward disappears, in both the string and []byte shapes that path logs.
+// The WithField("topic", "dm:…") redaction keeps working alongside.
+func TestRedactingLoggerScrubsRawOperands(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	newRedactingLogger().Println("Received command:", "SUB dm:supersecret")
+	out := buf.String()
+	if strings.Contains(out, "supersecret") {
+		t.Fatalf("raw operand leaked the dm secret: %q", out)
+	}
+	if !strings.Contains(out, "SUB "+redactedTopic) {
+		t.Fatalf("log %q missing the redacted command %q", out, "SUB "+redactedTopic)
+	}
+	if !strings.Contains(out, "Received command:") {
+		t.Fatalf("log %q dropped the surrounding operands", out)
+	}
+
+	// The WebSocket loop logs the command line as []byte; same scrub.
+	buf.Reset()
+	newRedactingLogger().Println("Received command:", []byte("SUB dm:supersecret"))
+	if out = buf.String(); strings.Contains(out, "supersecret") {
+		t.Fatalf("byte-slice operand leaked the dm secret: %q", out)
+	}
+
+	// Field and operand redaction coexist on one log line.
+	buf.Reset()
+	newRedactingLogger().
+		WithField("topic", "dm:another-secret").
+		Println("New client requested connection", "SUB dm:supersecret")
+	out = buf.String()
+	if strings.Contains(out, "another-secret") || strings.Contains(out, "supersecret") {
+		t.Fatalf("log %q leaked a dm topic through a field or an operand", out)
+	}
+	if !strings.Contains(out, redactedTopic) {
+		t.Fatalf("log %q missing the redaction marker %q", out, redactedTopic)
+	}
+
+	// Operands without a dm: topic pass through untouched.
+	buf.Reset()
+	newRedactingLogger().Println("Received command:", "SUB room")
+	if out = buf.String(); !strings.Contains(out, "SUB room") {
+		t.Fatalf("log %q mangled a plain topic operand", out)
+	}
+}
+
 // TestPresenceRoutesMountedThroughApp proves the presence surface (U4) is
 // wired into the whole App, including the duplicate-name disambiguation
 // (KTD5): two accounts sharing the username "twin" join, both render as
@@ -506,7 +611,7 @@ func TestPresenceRoutesMountedThroughApp(t *testing.T) {
 	noRedirect := &http.Client{
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
-	for _, path := range []string{"/api/presence/join", "/api/presence/heartbeat", "/api/leave"} {
+	for _, path := range []string{"/api/presence/join", "/api/presence/heartbeat", "/api/presence/leave"} {
 		resp, err := noRedirect.Post(ts.URL+path, "", nil)
 		if err != nil {
 			t.Fatalf("anonymous post %s: %v", path, err)
@@ -561,7 +666,7 @@ func TestPresenceRoutesMountedThroughApp(t *testing.T) {
 		t.Fatalf("heartbeat status %d, want 200", hbResp.StatusCode)
 	}
 
-	leave, err := http.NewRequest(http.MethodPost, ts.URL+"/api/leave", nil)
+	leave, err := http.NewRequest(http.MethodPost, ts.URL+"/api/presence/leave", nil)
 	if err != nil {
 		t.Fatalf("new leave: %v", err)
 	}
@@ -617,7 +722,7 @@ func TestPresenceJoinReachesSSESubscriberThroughRelay(t *testing.T) {
 		t.Fatalf("presence event entry %+v (found %v), want watcher", u, ok)
 	}
 
-	leave, err := http.NewRequest(http.MethodPost, ts.URL+"/api/leave", nil)
+	leave, err := http.NewRequest(http.MethodPost, ts.URL+"/api/presence/leave", nil)
 	if err != nil {
 		t.Fatalf("new leave: %v", err)
 	}

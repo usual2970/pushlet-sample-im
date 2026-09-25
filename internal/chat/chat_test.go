@@ -512,7 +512,7 @@ func TestHistoryOrderingAfterFilterAndCap(t *testing.T) {
 
 	ctx := context.Background()
 	for i := 1; i <= 60; i++ {
-		if _, err := fx.store.AppendMessage(ctx, RoomScope, "u-historian", "historian", "m", int64(1000+i)); err != nil {
+		if _, err := fx.store.AppendMessage(ctx, store.RoomScope, "u-historian", "historian", "m", int64(1000+i)); err != nil {
 			t.Fatalf("append %d: %v", i, err)
 		}
 	}
@@ -627,7 +627,7 @@ func TestChatPageSurvivesStoreReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if _, err := st.AppendMessage(ctx, RoomScope, user.ID, "survivor", "across restarts", 1234); err != nil {
+	if _, err := st.AppendMessage(ctx, store.RoomScope, user.ID, "survivor", "across restarts", 1234); err != nil {
 		t.Fatalf("append: %v", err)
 	}
 	token, err := st.NewSessionToken()

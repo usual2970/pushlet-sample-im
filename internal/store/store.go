@@ -25,6 +25,16 @@ import (
 // but one name combined with one password identifies exactly one account.
 var ErrPairExists = fmt.Errorf("an account with this username and password already exists")
 
+// RoomTopic is the fixed pushlet topic the whole room UI shares: every
+// global-room chat message and every presence snapshot is published on it,
+// by the chat and presence packages respectively. RoomScope is the matching
+// messages-table scope room history is stored under. Direct messages use
+// dm:-prefixed topics and scopes instead (see [DMTopic]).
+const (
+	RoomTopic = "room"
+	RoomScope = "room"
+)
+
 // DMTopicPrefix marks direct-message topics and conversation scopes. Topic
 // names identify private conversations, so they must never appear in logs
 // (the main package's logger redacts them).
@@ -299,7 +309,10 @@ func (s *Store) CreateSession(ctx context.Context, token, userID string) error {
 }
 
 // UserBySession resolves a session token to its account, or (nil, nil) when
-// the token is unknown — the middleware treats both the same.
+// the token is unknown. Callers distinguish that anonymous case from a
+// non-nil error: the auth middleware answers (nil, nil) with its anonymous
+// reply (401 for /api paths, a /login redirect for pages) and a lookup
+// failure with 500, so a store fault never masquerades as a logout.
 func (s *Store) UserBySession(ctx context.Context, token string) (*User, error) {
 	var u User
 	err := s.db.QueryRowContext(ctx, `
