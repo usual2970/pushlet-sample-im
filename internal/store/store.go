@@ -25,6 +25,19 @@ import (
 // but one name combined with one password identifies exactly one account.
 var ErrPairExists = fmt.Errorf("an account with this username and password already exists")
 
+// DMTopicPrefix marks direct-message topics and conversation scopes. Topic
+// names identify private conversations, so they must never appear in logs
+// (the main package's logger redacts them).
+const DMTopicPrefix = "dm:"
+
+// DMTopic returns the pushlet topic carrying one user's direct messages:
+// the dm: prefix plus the account's dm secret. Only the owning browser
+// learns it, via /api/me; senders hand the server a user id and the server
+// resolves the topic from the account record (KTD6).
+func DMTopic(dmSecret string) string {
+	return DMTopicPrefix + dmSecret
+}
+
 // User is one registered account.
 type User struct {
 	ID           string

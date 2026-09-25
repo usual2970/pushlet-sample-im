@@ -489,6 +489,11 @@ func TestChatPageRendersShellAndHistory(t *testing.T) {
 		`id="conn-banner"`,    // the reconnecting banner
 		`id="online-list"`,    // U4's reserved online list container
 		`id="logout"`,         // the logout button
+		`id="dm"`,             // U5's direct-message panel
+		`id="dm-messages"`,    // the open conversation's message list
+		`id="dm-composer"`,    // the DM composer form
+		`id="dm-input"`,       // the DM composer input
+		`id="dm-list"`,        // the DM conversation list
 		"/static/app.js",      // the client script
 	} {
 		if !strings.Contains(string(page), want) {

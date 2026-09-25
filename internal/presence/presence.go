@@ -224,6 +224,15 @@ func (e *Engine) Snapshot() Snapshot {
 	return e.snapshotLocked()
 }
 
+// IsOnline reports whether userID currently has a live entry — the check the
+// direct-message send path gates recipients on.
+func (e *Engine) IsOnline(userID string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	_, ok := e.online[userID]
+	return ok
+}
+
 // snapshotLocked builds the wire snapshot; the caller holds e.mu. Entries
 // are ordered by (name, id) so map iteration order never reaches a client,
 // and every user sharing a name with another concurrently online user gets

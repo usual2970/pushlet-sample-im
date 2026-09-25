@@ -183,15 +183,21 @@ func (s *Service) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-// HandleMe describes the signed-in user. U5 will extend the response with
-// the user's direct-message topic.
+// HandleMe describes the signed-in user: their id, username, and dm_topic —
+// the private pushlet topic their browser subscribes to for direct messages
+// (KTD6). This is the only endpoint a dm secret ever reaches, and it reaches
+// only its owner; register and login replies carry just id and username.
 func (s *Service) HandleMe(w http.ResponseWriter, r *http.Request) {
 	user, ok := FromContext(r.Context())
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
-	writeUser(w, user)
+	writeJSON(w, http.StatusOK, map[string]string{
+		"id":       user.ID,
+		"username": user.Username,
+		"dm_topic": store.DMTopic(user.DMSecret),
+	})
 }
 
 // resolveUser maps a request's session cookie to its account, returning nil
@@ -289,7 +295,8 @@ func validUsername(s string) bool {
 	return true
 }
 
-// writeUser answers with the JSON shape returned by register, login, and me.
+// writeUser answers with the JSON shape returned by register and login; the
+// richer /api/me shape (with the dm topic) is built by [Service.HandleMe].
 func writeUser(w http.ResponseWriter, user *store.User) {
 	writeJSON(w, http.StatusOK, map[string]string{
 		"id":       user.ID,

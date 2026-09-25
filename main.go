@@ -32,6 +32,7 @@ import (
 
 	"github.com/usual2970/sample-im/internal/auth"
 	"github.com/usual2970/sample-im/internal/chat"
+	"github.com/usual2970/sample-im/internal/dm"
 	"github.com/usual2970/sample-im/internal/presence"
 	"github.com/usual2970/sample-im/internal/store"
 )
@@ -106,6 +107,7 @@ type App struct {
 	authSrv     *auth.Service
 	chatSrv     *chat.Service
 	presenceSrv *presence.Engine
+	dmSrv       *dm.Service
 	push        *pushlet.Pushlet
 	mux         *http.ServeMux
 	stopOn      sync.Once
@@ -168,6 +170,7 @@ func NewApp(cfg Config) (*App, error) {
 	}
 	app.chatSrv = chat.NewService(appStore, app.push, tpl)
 	app.presenceSrv = presence.NewEngine(app.push, presence.Config{})
+	app.dmSrv = dm.NewService(appStore, app.push, app.presenceSrv)
 
 	app.mux = http.NewServeMux()
 	app.mountRoutes(staticRoot)
@@ -192,6 +195,9 @@ func (a *App) mountRoutes(staticRoot fs.FS) {
 	a.mux.Handle("POST /api/presence/join", a.authSrv.RequireAuth(http.HandlerFunc(a.presenceSrv.HandleJoin)))
 	a.mux.Handle("POST /api/presence/heartbeat", a.authSrv.RequireAuth(http.HandlerFunc(a.presenceSrv.HandleHeartbeat)))
 	a.mux.Handle("POST /api/leave", a.authSrv.RequireAuth(http.HandlerFunc(a.presenceSrv.HandleLeave)))
+	a.mux.Handle("POST /api/dm", a.authSrv.RequireAuth(http.HandlerFunc(a.dmSrv.HandleSend)))
+	a.mux.Handle("GET /api/dm", a.authSrv.RequireAuth(http.HandlerFunc(a.dmSrv.HandleHistory)))
+	a.mux.Handle("GET /api/users/{id}", a.authSrv.RequireAuth(http.HandlerFunc(a.dmSrv.HandleUser)))
 	a.mux.Handle("GET /static/", http.StripPrefix("/static/", staticHandler(staticRoot)))
 	a.mux.HandleFunc("/", handleIndex)
 }
@@ -279,12 +285,11 @@ func handleIndex(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintln(w, "  POST /api/presence/join     announce yourself, get the online list")
 	fmt.Fprintln(w, "  POST /api/presence/heartbeat  keep your online entry alive")
 	fmt.Fprintln(w, "  POST /api/leave       leave the online list (sendBeacon-friendly)")
+	fmt.Fprintln(w, "  POST /api/dm          send a direct message (JSON, recipient must be online)")
+	fmt.Fprintln(w, "  GET /api/dm?with=id   your direct-message history with that user")
+	fmt.Fprintln(w, "  GET /api/users/<id>   a user's public name (for DM headers)")
 	fmt.Fprintln(w, "  GET /static/...       embedded client assets")
 }
-
-// dmTopicPrefix marks direct-message topics. Their names identify
-// conversations between users and must never appear in logs.
-const dmTopicPrefix = "dm:"
 
 // redactedTopic replaces any dm: topic value in log output.
 const redactedTopic = "dm:***"
@@ -325,7 +330,7 @@ func (l *redactingLogger) prefix() []any {
 	for _, k := range slices.Sorted(maps.Keys(l.fields)) {
 		v := l.fields[k]
 		if k == "topic" {
-			if s, ok := v.(string); ok && strings.HasPrefix(s, dmTopicPrefix) {
+			if s, ok := v.(string); ok && strings.HasPrefix(s, store.DMTopicPrefix) {
 				v = redactedTopic
 			}
 		}

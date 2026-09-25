@@ -1,9 +1,11 @@
 'use strict';
 
-// sample-im room client. Subscribes to the fixed "room" SSE topic, merges
-// stream messages with the server-rendered history keyed on server message
-// ids, posts new messages to /api/messages, and tracks the caller's presence
-// (join on every (re)connect, heartbeats, a leave beacon on unload).
+// sample-im room + DM client. Subscribes to the fixed "room" SSE topic and,
+// after /api/me reveals the caller's private dm topic, to a second stream for
+// their direct messages. Merges stream messages with server-rendered history
+// keyed on server message ids, posts room messages to /api/messages and DMs
+// to /api/dm, and tracks the caller's presence (join on every (re)connect,
+// heartbeats, a leave beacon on unload).
 // Security rule (KTD12): every piece of dynamic text is set through
 // textContent — user content never touches innerHTML.
 
@@ -15,9 +17,18 @@ const connBanner = document.getElementById('conn-banner');
 const logoutButton = document.getElementById('logout');
 const onlineList = document.getElementById('online-list');
 
+const dmMessages = document.getElementById('dm-messages');
+const dmTitle = document.getElementById('dm-title');
+const dmComposerForm = document.getElementById('dm-composer');
+const dmInput = document.getElementById('dm-input');
+const dmSend = document.getElementById('dm-send');
+const dmError = document.getElementById('dm-error');
+const dmList = document.getElementById('dm-list');
+
 let lastSeenId = 0;         // highest server message id rendered
 const seenIds = new Set();  // every server message id rendered
 let errorTimer = 0;
+let dmErrorTimer = 0;
 
 // ---- rendering ----
 
@@ -156,16 +167,30 @@ async function backfill() {
 // reply and every "presence" stream event both carry the full list, so a
 // plain replace converges. Display names (already disambiguated server-side
 // as name#xxxx for duplicate usernames) are user content: textContent only.
+// Clicking another user opens (or creates) a DM conversation with them; your
+// own entry is inert — no self-DMs.
+let lastSnapshot = null;
+
 function renderOnline(snapshot) {
   if (!snapshot || !Array.isArray(snapshot.online)) return;
+  lastSnapshot = snapshot;
   const rows = [];
   for (const user of snapshot.online) {
+    const self = Boolean(me && user.id === me.id);
+    if (user.display || user.name) names.set(user.id, user.display || user.name);
     const row = document.createElement('li');
     row.dataset.id = String(user.id);
-    row.textContent = user.display || user.name || '';
+    row.textContent = (user.display || user.name || '') + (self ? ' (you)' : '');
+    if (self) {
+      row.className = 'self';
+    } else {
+      row.className = 'online-row';
+      row.addEventListener('click', () => openConversation(user.id));
+    }
     rows.push(row);
   }
   onlineList.replaceChildren(...rows);
+  renderConversationList();
 }
 
 // joinPresence announces the caller and renders the list from the reply.
@@ -240,6 +265,256 @@ composerInput.addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault();
     composerForm.requestSubmit();
+  }
+});
+
+// ---- direct messages ----
+
+// The caller's identity arrives from /api/me: it carries the one private
+// piece of DM state the page needs — the dm topic to subscribe to. Until it
+// resolves, incoming DM events have nowhere to route and are ignored (the
+// open-conversation fetch and this stream re-deliver them).
+let me = null;
+
+// conversations maps peer user id -> {unread, lastId, routed}: one entry per
+// correspondent row. routed dedupes stream delivery per conversation; the
+// open pane keeps its own seen set so reopening a conversation re-renders
+// its history.
+const conversations = new Map();
+const names = new Map(); // user id -> display name, from snapshots and lookups
+let openPeer = null;
+let dmPaneSeen = new Set();
+
+async function loadMe() {
+  try {
+    const res = await fetch('/api/me');
+    if (!res.ok) return;
+    const user = await res.json();
+    if (!user || !user.id || !user.dm_topic) return;
+    me = user;
+    openDMStream(me.dm_topic);
+    if (lastSnapshot) renderOnline(lastSnapshot); // mark "(you)" retroactively
+  } catch (err) {
+    // Session or network trouble; the room keeps working without DMs.
+  }
+}
+loadMe();
+
+// openDMStream subscribes to the caller's private topic. The dm stream is
+// separate from the room stream, so a DM never renders in the room and a
+// room message never touches a conversation.
+function openDMStream(topic) {
+  const stream = new EventSource('/events?topic=' + encodeURIComponent(topic));
+
+  stream.addEventListener('connected', () => {
+    // Heal whatever the missed deliveries were: refetch the open
+    // conversation's history, merged in by message id.
+    if (openPeer) loadConversation(openPeer);
+  });
+
+  stream.addEventListener('message', (ev) => {
+    let msg;
+    try {
+      msg = JSON.parse(ev.data);
+    } catch (err) {
+      return;
+    }
+    routeDM(msg);
+  });
+}
+
+// routeDM derives the correspondent from one payload shape shared by both
+// topics: the peer is the author unless I am the author, in which case it is
+// the recipient. Own copies and the other side's messages alike create their
+// conversation row; unread bumps only for messages from someone else while
+// that conversation is not open.
+function routeDM(msg) {
+  if (!me || !msg || !Number.isInteger(msg.id)) return;
+  const peer = msg.author_id === me.id ? msg.to : msg.author_id;
+  if (!peer) return;
+  const conv = ensureConversation(peer);
+  if (conv.routed.has(msg.id)) return;
+  conv.routed.add(msg.id);
+  conv.lastId = msg.id;
+  if (peer === openPeer) {
+    mergeDM(msg);
+  } else if (msg.author_id !== me.id) {
+    conv.unread += 1;
+  }
+  renderConversationList();
+}
+
+// ensureConversation creates the correspondent's row state on first sight
+// and resolves their display name (snapshot first, public lookup second).
+function ensureConversation(peer) {
+  let conv = conversations.get(peer);
+  if (!conv) {
+    conv = { unread: 0, lastId: 0, routed: new Set() };
+    conversations.set(peer, conv);
+    lookupName(peer);
+  }
+  return conv;
+}
+
+// lookupName fills the names map for a user the snapshots have not shown —
+// the sender of a DM that arrives after they already went offline.
+async function lookupName(peer) {
+  if (names.has(peer)) return;
+  try {
+    const res = await fetch('/api/users/' + encodeURIComponent(peer));
+    if (!res.ok) return;
+    const user = await res.json();
+    const name = user && (user.display_name || user.username);
+    if (!name) return;
+    names.set(peer, name);
+    if (peer === openPeer) dmTitle.textContent = name;
+    renderConversationList();
+  } catch (err) {
+    // Offline; the next snapshot or open refetches the header.
+  }
+}
+
+// renderConversationList rebuilds the sidebar rows: most recent conversation
+// first, the open one highlighted, unread counts as badges.
+function renderConversationList() {
+  const peers = [...conversations.keys()];
+  peers.sort((a, b) => (conversations.get(b).lastId || 0) - (conversations.get(a).lastId || 0));
+  const rows = [];
+  for (const peer of peers) {
+    const conv = conversations.get(peer);
+    const row = document.createElement('li');
+    row.dataset.id = String(peer);
+    row.className = peer === openPeer ? 'conv-row active' : 'conv-row';
+
+    const name = document.createElement('span');
+    name.className = 'conv-name';
+    name.textContent = names.get(peer) || '…';
+    row.append(name);
+
+    if (conv.unread > 0) {
+      const badge = document.createElement('span');
+      badge.className = 'badge';
+      badge.textContent = conv.unread > 99 ? '99+' : String(conv.unread);
+      row.append(badge);
+    }
+
+    row.addEventListener('click', () => openConversation(peer));
+    rows.push(row);
+  }
+  dmList.replaceChildren(...rows);
+}
+
+// mergeDM renders msg in the open conversation's pane unless its id is
+// already there, inserting in id order — same rules as mergeMessage. Own
+// messages align right.
+function mergeDM(msg) {
+  if (!msg || !Number.isInteger(msg.id) || dmPaneSeen.has(msg.id)) return;
+
+  const emptyRow = dmMessages.querySelector('.empty');
+  if (emptyRow) emptyRow.remove();
+
+  const stick = dmMessages.scrollHeight - dmMessages.scrollTop - dmMessages.clientHeight < 120;
+  const row = messageRow(msg);
+  if (me && msg.author_id === me.id) row.classList.add('own');
+  let placed = false;
+  for (const sibling of dmMessages.children) {
+    const siblingId = Number(sibling.dataset ? sibling.dataset.id : NaN);
+    if (Number.isInteger(siblingId) && siblingId > msg.id) {
+      dmMessages.insertBefore(row, sibling);
+      placed = true;
+      break;
+    }
+  }
+  if (!placed) dmMessages.appendChild(row);
+
+  dmPaneSeen.add(msg.id);
+  if (stick) dmMessages.scrollTop = dmMessages.scrollHeight;
+}
+
+// openConversation switches the DM pane to one correspondent: clears unread,
+// resets the pane's seen set, and loads the pair's history through the same
+// merge path live events use. Clicking an online user and clicking a row
+// both land here, so rows are created on demand.
+async function openConversation(peer) {
+  if (!me || peer === me.id) return; // no self-DMs
+  openPeer = peer;
+  const conv = ensureConversation(peer);
+  conv.unread = 0;
+
+  dmTitle.textContent = names.get(peer) || '…';
+  lookupName(peer);
+  dmInput.disabled = false;
+  dmSend.disabled = false;
+
+  dmPaneSeen = new Set();
+  dmMessages.replaceChildren();
+  const emptyRow = document.createElement('li');
+  emptyRow.className = 'empty';
+  emptyRow.textContent = 'No messages yet — say hello.';
+  dmMessages.appendChild(emptyRow);
+  dmMessages.scrollTop = 0;
+
+  renderConversationList();
+  await loadConversation(peer);
+  dmInput.focus();
+}
+
+// loadConversation fetches the pair's history into the pane. It runs on open
+// and on every dm-stream (re)connect, so a stream that was down heals by
+// refetch — the same backfill idea the room uses.
+async function loadConversation(peer) {
+  if (peer !== openPeer) return;
+  try {
+    const res = await fetch('/api/dm?with=' + encodeURIComponent(peer));
+    if (!res.ok || peer !== openPeer) return;
+    const messages = await res.json();
+    if (!Array.isArray(messages)) return;
+    for (const msg of messages) mergeDM(msg);
+  } catch (err) {
+    // Offline mid-reconnect; the next connected event retries.
+  }
+}
+
+function showDMError(text) {
+  dmError.textContent = text;
+  dmError.hidden = false;
+  clearTimeout(dmErrorTimer);
+  dmErrorTimer = setTimeout(() => { dmError.hidden = true; }, 4000);
+}
+
+dmComposerForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (!me || !openPeer) return;
+  const body = dmInput.value;
+  try {
+    const res = await fetch('/api/dm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to: openPeer, body: body }),
+    });
+    if (!res.ok) {
+      let message = 'send failed (status ' + res.status + ')';
+      if (res.status === 409) {
+        message = 'user went offline — message not sent';
+      } else if (res.status === 404) {
+        message = 'user not found';
+      } else {
+        try { message = (await res.json()).error || message; } catch (err) { /* non-JSON body */ }
+      }
+      showDMError(message);
+      return; // keep the drafted text; the server rejected it
+    }
+    dmInput.value = ''; // the own copy arrives via the dm stream
+    dmInput.focus();
+  } catch (err) {
+    showDMError('network error: ' + err);
+  }
+});
+
+dmInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault();
+    dmComposerForm.requestSubmit();
   }
 });
 

@@ -375,6 +375,23 @@ func TestStaticAssetsServed(t *testing.T) {
 			t.Fatalf("%s does not contain %q", path, want)
 		}
 	}
+
+	// The client script wires both streams: the fixed room topic and the
+	// caller's private dm topic resolved from /api/me.
+	resp, err := http.Get(ts.URL + "/static/app.js")
+	if err != nil {
+		t.Fatalf("get /static/app.js: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read /static/app.js: %v", err)
+	}
+	for _, want := range []string{"/api/me", "/api/dm"} {
+		if !strings.Contains(string(body), want) {
+			t.Fatalf("app.js does not reference %q", want)
+		}
+	}
 }
 
 // TestPushHandlersUnavailableBeforeStart pins the ordering constraint:

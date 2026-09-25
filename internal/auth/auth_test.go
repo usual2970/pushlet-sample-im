@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -190,6 +191,53 @@ func TestRegisterLoginMeFlow(t *testing.T) {
 	}
 	if login.session == "" {
 		t.Fatal("login did not set the session cookie")
+	}
+}
+
+// TestMeExposesDMTopic pins the KTD6 contract: /api/me is the only endpoint
+// that reveals a user's direct-message topic, it derives from the account's
+// dm secret (itself at least 22 random chars), and the register/login replies
+// never carry it.
+func TestMeExposesDMTopic(t *testing.T) {
+	fx, ts := newTestService(t)
+	client := &http.Client{}
+
+	reg := postCredentials(t, client, ts.URL, "/api/register", "kim", "pw")
+	if reg.status != http.StatusOK {
+		t.Fatalf("register status %d, want 200", reg.status)
+	}
+	if _, leaked := reg.body["dm_topic"]; leaked {
+		t.Fatalf("register reply %v leaks the dm topic", reg.body)
+	}
+
+	meResp := getWithCookie(t, ts.URL+"/api/me", reg.session)
+	if meResp.StatusCode != http.StatusOK {
+		t.Fatalf("/api/me status %d, want 200", meResp.StatusCode)
+	}
+	var meBody map[string]string
+	if err := json.NewDecoder(meResp.Body).Decode(&meBody); err != nil {
+		t.Fatalf("decode /api/me: %v", err)
+	}
+	if meBody["id"] != reg.body["id"] || meBody["username"] != "kim" {
+		t.Fatalf("/api/me body %v lost id/username", meBody)
+	}
+	topic := meBody["dm_topic"]
+	if !strings.HasPrefix(topic, "dm:") {
+		t.Fatalf("dm_topic %q does not start with dm:", topic)
+	}
+	if len(topic) < len("dm:")+22 {
+		t.Fatalf("dm_topic %q is shorter than the 22-char secret minimum", topic)
+	}
+
+	user, err := fx.store.UserByID(context.Background(), reg.body["id"])
+	if err != nil || user == nil {
+		t.Fatalf("lookup registered account: %v %v", user, err)
+	}
+	if len(user.DMSecret) < 22 {
+		t.Fatalf("stored dm_secret %q is shorter than 22 chars", user.DMSecret)
+	}
+	if want := store.DMTopic(user.DMSecret); topic != want {
+		t.Fatalf("dm_topic %q, want the topic derived from the account %q", topic, want)
 	}
 }
 

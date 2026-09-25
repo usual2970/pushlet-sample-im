@@ -111,7 +111,7 @@ body.chat {
   min-width: 0;
 }
 
-#messages {
+.messages {
   flex: 1;
   margin: 0;
   padding: 1rem;
@@ -150,6 +150,7 @@ body.chat {
   padding: 1rem;
   background: #ffffff;
   border-left: 1px solid #e2e4e8;
+  overflow-y: auto;
 }
 .online h2 {
   margin: 0 0 0.75rem;
@@ -159,7 +160,71 @@ body.chat {
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
-.online ul { margin: 0; padding: 0; list-style: none; }
+.online ul { margin: 0 0 1.25rem; padding: 0; list-style: none; }
+
+/* ---- direct messages ---- */
+
+.dm {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  background: #ffffff;
+  border-left: 1px solid #e2e4e8;
+}
+.dm-header {
+  padding: 0.6rem 1rem;
+  border-bottom: 1px solid #e2e4e8;
+}
+.dm-header h2 {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #5b6068;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.msg.own { align-self: flex-end; text-align: right; }
+
+.composer textarea:disabled,
+.composer button:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.online .online-row {
+  padding: 0.25rem 0.4rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.online .online-row:hover { background: #eef1f6; }
+.online .self { padding: 0.25rem 0.4rem; color: #5b6068; }
+
+.conv-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.25rem 0.4rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.conv-row:hover { background: #eef1f6; }
+.conv-row.active { background: #e4ecfd; }
+.conv-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.badge {
+  flex: none;
+  min-width: 1.3rem;
+  padding: 0.05rem 0.35rem;
+  border-radius: 999px;
+  background: #d23f31;
+  color: #ffffff;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-align: center;
+}
 
 /* ---- dark mode ---- */
 
@@ -171,7 +236,11 @@ body.chat {
   body.login #error { background: #3a2020; border-color: #5c2b2b; }
 
   #conn-banner { color: #ffd98a; background: #3a2f14; border-color: #5c4a1c; }
-  .chat-header, .composer, .online { background: #1f2229; border-color: #33363e; }
+  .chat-header, .composer, .online, .dm { background: #1f2229; border-color: #33363e; }
+  .dm-header { border-color: #33363e; }
   .room-name, .msg .meta, .empty { color: #9aa1ab; }
   .composer-error { color: #ff8f94; }
+  .online .online-row:hover, .conv-row:hover { background: #2a2e37; }
+  .conv-row.active { background: #2c3a5e; }
+  .online .self { color: #9aa1ab; }
 }
