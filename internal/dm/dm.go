@@ -80,7 +80,9 @@ func NewService(st *store.Store, pub Publisher, online Presence) *Service {
 }
 
 // HandleSend accepts JSON {to, body}: it validates the body with the room's
-// 1..2000-byte-after-trim rule, requires the recipient to exist (404) and be
+// 1..2000-byte-after-trim rule, requires the recipient to exist (404), be
+// someone other than the caller (400 — the UI never offers self-DMs, and
+// honoring one would create a dead dm:<id>:<id> conversation), and be
 // online per the presence engine (409 — the UI picks recipients from the
 // online list, so an offline recipient means stale presence), persists the
 // message under the pair's conversation scope with the author stamped, then
@@ -124,6 +126,10 @@ func (s *Service) HandleSend(w http.ResponseWriter, r *http.Request) {
 	}
 	if recipient == nil {
 		auth.WriteError(w, http.StatusNotFound, "recipient not found")
+		return
+	}
+	if recipient.ID == user.ID {
+		auth.WriteError(w, http.StatusBadRequest, "cannot send a direct message to yourself")
 		return
 	}
 	if !s.online.IsOnline(recipient.ID) {

@@ -1,9 +1,10 @@
 // Package presence implements sample-im's application-level online tracking:
 // pushlet exports no connect/disconnect hooks, so the app owns
 // presence itself. Clients announce themselves on every stream (re)connect,
-// keep their entry alive with heartbeats, and bow out with a sendBeacon on
-// page unload; a sweeper goroutine expires whatever stopped beating, so a
-// crashed client shows online for at most the TTL.
+// keep their entry alive with heartbeats (which also re-announce an entry
+// lost to a sweep), and bow out with a sendBeacon on page unload; a sweeper
+// goroutine expires whatever stopped beating, so a crashed client shows
+// online for at most the TTL.
 package presence
 
 import (
@@ -76,16 +77,21 @@ type Config struct {
 
 // Engine tracks who is online in a map of user id → (name, lastSeen) behind
 // a mutex, and publishes a snapshot to the room topic on every join, leave,
-// and ghost expiry. Construct it with [NewEngine], mount the handlers behind
-// [auth.Service.RequireAuth], and pair [Engine.Start] (the sweeper) with
-// [Engine.Stop]. Multiple tabs of one account share a single entry because
-// the map is keyed by user id.
+// ghost expiry, and heartbeat that re-adds a lost entry. Construct it with
+// [NewEngine], mount the handlers behind [auth.Service.RequireAuth], and pair
+// [Engine.Start] (the sweeper) with [Engine.Stop]. Multiple tabs of one
+// account share a single entry because the map is keyed by user id.
 type Engine struct {
-	pub         Publisher
-	ttl         time.Duration
-	sweepEvery  time.Duration
-	now         func() time.Time
-	online      map[string]*entry
+	pub        Publisher
+	ttl        time.Duration
+	sweepEvery time.Duration
+	now        func() time.Time
+	online     map[string]*entry
+	// sweepDirty is set the moment a sweep removes an entry and cleared only
+	// after a sweep publish succeeds, so a failed post-removal publish is
+	// retried by later sweeps instead of being silently dropped. Guarded by
+	// mu; an extra retry publish is harmless because snapshots are idempotent.
+	sweepDirty  bool
 	mu          sync.Mutex
 	startOnce   sync.Once
 	stopOnce    sync.Once
@@ -156,25 +162,31 @@ func (e *Engine) sweepLoop() {
 
 // sweepOnce drops every entry whose lastSeen is older than the TTL. When
 // anything was dropped it publishes the snapshot so ghost expiry propagates
-// to connected clients. Publish failures are ignored here: snapshots are
-// idempotent and the next join, leave, or sweep republishes the healed list.
+// to connected clients. A failed publish leaves the sweeper dirty: later
+// sweeps — even quiescent ones with nothing to drop — republish the current
+// (idempotent) snapshot until one succeeds, so a quiet room still converges
+// on the healed list instead of waiting for the next join or leave.
 func (e *Engine) sweepOnce() {
 	e.mu.Lock()
 	now := e.now()
-	removed := false
 	for id, ent := range e.online {
 		if now.Sub(ent.lastSeen) > e.ttl {
 			delete(e.online, id)
-			removed = true
+			e.sweepDirty = true
 		}
 	}
-	if !removed {
+	if !e.sweepDirty {
 		e.mu.Unlock()
 		return
 	}
 	snap := e.snapshotLocked()
 	e.mu.Unlock()
-	_ = e.publish(snap)
+	if err := e.publish(snap); err != nil {
+		return // still dirty: the next sweep retries with a fresh snapshot
+	}
+	e.mu.Lock()
+	e.sweepDirty = false
+	e.mu.Unlock()
 }
 
 // Join records the caller as online, refreshing lastSeen for an
@@ -190,14 +202,24 @@ func (e *Engine) Join(userID, username string) (Snapshot, error) {
 }
 
 // Heartbeat refreshes the caller's lastSeen, keeping a quiet-but-alive tab
-// online. An unknown id (already swept, or never joined) is ignored: the
-// client's next join on stream reconnect re-announces it.
-func (e *Engine) Heartbeat(userID string) {
+// online. A heartbeat for an id with no entry (TTL-swept while a throttled
+// background tab missed its beats, or a join that never landed) re-adds it:
+// heartbeats stop when the client truly goes away, so the upsert cannot
+// outlive the TTL. A re-added entry is announced with a snapshot publish —
+// the same transition a join makes — and the publish error is returned so
+// callers can report the degraded broadcast; a plain refresh publishes
+// nothing.
+func (e *Engine) Heartbeat(userID, username string) error {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	if ent, ok := e.online[userID]; ok {
 		ent.lastSeen = e.now()
+		e.mu.Unlock()
+		return nil
 	}
+	e.online[userID] = &entry{name: username, lastSeen: e.now()}
+	snap := e.snapshotLocked()
+	e.mu.Unlock()
+	return e.publish(snap)
 }
 
 // Leave removes the caller. Nothing is published when the caller was not
@@ -293,14 +315,21 @@ func (e *Engine) HandleJoin(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleHeartbeat serves POST /api/presence/heartbeat: it refreshes the
-// caller's lastSeen and answers 200. The body is ignored.
+// caller's lastSeen and answers 200. The body is ignored — identity, and the
+// username should the heartbeat double as a rejoin, come from the session,
+// exactly like join. When the heartbeat re-adds a lost entry and that
+// broadcast fails, the entry still stands and the reply reports the degraded
+// broadcast with 502, matching join and leave.
 func (e *Engine) HandleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	user, ok := auth.FromContext(r.Context())
 	if !ok {
 		auth.WriteError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
-	e.Heartbeat(user.ID)
+	if err := e.Heartbeat(user.ID, user.Username); err != nil {
+		auth.WriteError(w, http.StatusBadGateway, "online but not broadcast; the list heals on the next update")
+		return
+	}
 	auth.WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 

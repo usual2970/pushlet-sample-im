@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -63,10 +64,22 @@ func FromContext(ctx context.Context) (*store.User, bool) {
 // RequireAuth wraps next so only requests carrying a valid session cookie
 // reach it. The resolved user is stored in the request context (see
 // [FromContext]). Unauthenticated requests are rejected the way their caller
-// expects: JSON 401 for /api/ paths, a redirect to /login for pages.
+// expects: JSON 401 for /api/ paths, a redirect to /login for pages. A failed
+// session lookup is not treated as anonymous — it answers 500 (JSON on /api/
+// paths) after logging the error, so a store fault cannot masquerade as a
+// mass logout.
 func (s *Service) RequireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user := s.resolveUser(r)
+		user, err := s.resolveUser(r)
+		if err != nil {
+			log.Printf("auth: resolve session for %s %s: %v", r.Method, r.URL.Path, err)
+			if strings.HasPrefix(r.URL.Path, "/api/") {
+				WriteError(w, http.StatusInternalServerError, "could not verify the session")
+				return
+			}
+			http.Error(w, "could not verify the session", http.StatusInternalServerError)
+			return
+		}
 		if user == nil {
 			if strings.HasPrefix(r.URL.Path, "/api/") {
 				WriteError(w, http.StatusUnauthorized, "authentication required")
@@ -80,9 +93,16 @@ func (s *Service) RequireAuth(next http.Handler) http.Handler {
 }
 
 // HandleLoginPage serves the combined login/registration page. Visitors that
-// are already signed in are sent straight to /chat.
+// are already signed in are sent straight to /chat. A failed session lookup
+// is logged and treated like a signed-out visitor: the page itself needs no
+// store, so a store fault does not take /login down with it (a signed-in
+// visitor just sees the login page again instead of an error).
 func (s *Service) HandleLoginPage(w http.ResponseWriter, r *http.Request) {
-	if s.resolveUser(r) != nil {
+	user, err := s.resolveUser(r)
+	if err != nil {
+		log.Printf("auth: resolve session on %s %s: %v", r.Method, r.URL.Path, err)
+	}
+	if user != nil {
 		http.Redirect(w, r, "/chat", http.StatusFound)
 		return
 	}
@@ -200,18 +220,21 @@ func (s *Service) HandleMe(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// resolveUser maps a request's session cookie to its account, returning nil
-// for anonymous requests.
-func (s *Service) resolveUser(r *http.Request) *store.User {
+// resolveUser maps a request's session cookie to its account. It returns
+// (nil, nil) for anonymous requests — no cookie, or a token no session row
+// matches ([store.Store.UserBySession] already maps that to (nil, nil)) — and
+// a non-nil error when the session lookup itself failed, so callers can tell
+// a store fault from an unsigned visitor.
+func (s *Service) resolveUser(r *http.Request) (*store.User, error) {
 	c, err := r.Cookie(SessionCookieName)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	user, err := s.store.UserBySession(r.Context(), c.Value)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	return user
+	return user, nil
 }
 
 // startSession mints a session token, persists it for userID, and sets the

@@ -421,6 +421,66 @@ func TestMiddlewareRejectsAnonymousRequests(t *testing.T) {
 	}
 }
 
+// TestSessionStoreFailureIsNotLogout breaks the store under a signed-in
+// session (a closed database fails every lookup, the way a real store fault
+// does): the middleware must answer 500 — JSON on /api/ paths — rather than
+// the 401/redirect an anonymous request gets, so a store fault never looks
+// like a mass logout. /login keeps rendering its page, since it needs no
+// store to do so.
+func TestSessionStoreFailureIsNotLogout(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "app.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	tpl, err := template.ParseFiles(loginTemplatePath)
+	if err != nil {
+		t.Fatalf("parse login template: %v", err)
+	}
+	fx := newFixture(t, st, tpl)
+	ts := httptest.NewServer(fx.mux)
+	t.Cleanup(ts.Close)
+
+	reg := postCredentials(t, http.DefaultClient, ts.URL, "/api/register", "zoe", "pw")
+	if reg.status != http.StatusOK {
+		t.Fatalf("register status %d, want 200", reg.status)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	api := getWithCookie(t, ts.URL+"/api/me", reg.session)
+	if api.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("/api/me over a broken store: status %d, want 500 (not the 401 of an anonymous request)", api.StatusCode)
+	}
+	if ct := api.Header.Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Fatalf("/api/me content type %q, want JSON", ct)
+	}
+	var apiBody map[string]string
+	if err := json.NewDecoder(api.Body).Decode(&apiBody); err != nil {
+		t.Fatalf("decode /api/me error body: %v", err)
+	}
+	if apiBody["error"] == "" {
+		t.Fatalf("error body %v carries no error message", apiBody)
+	}
+
+	page := getWithCookie(t, ts.URL+"/chat", reg.session)
+	if page.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("/chat over a broken store: status %d, want 500 (not a redirect that would look like a logout)", page.StatusCode)
+	}
+
+	login := getWithCookie(t, ts.URL+"/login", reg.session)
+	if login.StatusCode != http.StatusOK {
+		t.Fatalf("/login over a broken store: status %d, want 200 (the page renders without the store)", login.StatusCode)
+	}
+	if ct := login.Header.Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Fatalf("/login content type %q, want text/html", ct)
+	}
+	loginPage, _ := io.ReadAll(login.Body)
+	if !strings.Contains(string(loginPage), `id="login-form"`) {
+		t.Fatal("/login over a broken store did not render the login form")
+	}
+}
+
 // TestLoginPageServesBothForms checks the combined page (R13): /login
 // answers 200 with the login and registration forms, and sends signed-in
 // visitors to /chat instead.

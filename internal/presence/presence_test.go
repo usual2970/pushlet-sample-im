@@ -81,6 +81,28 @@ type failingPublisher struct{ err error }
 
 func (f failingPublisher) PublishJSON(string, string, any) error { return f.err }
 
+// scriptedPublisher simulates a transient outage: the 1-based call numbers in
+// failAt return an error, every other call records like capturePublisher.
+// Sweep-retry tests script exactly one failed publish this way.
+type scriptedPublisher struct {
+	capturePublisher
+	mu     sync.Mutex
+	calls  int
+	failAt map[int]bool
+}
+
+func (p *scriptedPublisher) PublishJSON(topic, event string, v any) error {
+	p.mu.Lock()
+	p.calls++
+	call := p.calls
+	fail := p.failAt[call]
+	p.mu.Unlock()
+	if fail {
+		return fmt.Errorf("publish %d failed (scripted outage)", call)
+	}
+	return p.capturePublisher.PublishJSON(topic, event, v)
+}
+
 // fixture wires a store, the auth service, and one presence engine behind the
 // same RequireAuth middleware main.go uses, over a fresh SQLite file. The
 // engine's publisher is whatever the test built it with.
@@ -220,7 +242,9 @@ func TestHeartbeatRefreshesLiveness(t *testing.T) {
 	// Heartbeat at 40s in: 5s before expiry. Another 40s later the entry is
 	// only 40s old again, so the sweep keeps it.
 	clock.Advance(40 * time.Second)
-	e.Heartbeat("user-1")
+	if err := e.Heartbeat("user-1", "bob"); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
 	clock.Advance(40 * time.Second)
 	e.sweepOnce()
 	if got := e.Snapshot().Online; len(got) != 1 || got[0].ID != "user-1" {
@@ -232,6 +256,54 @@ func TestHeartbeatRefreshesLiveness(t *testing.T) {
 	e.sweepOnce()
 	if got := e.Snapshot().Online; len(got) != 0 {
 		t.Fatalf("after silent TTL %+v online, want it expired", got)
+	}
+}
+
+// TestHeartbeatRejoinsAbsentEntry pins the self-heal: a heartbeat for an id
+// with no entry (TTL-swept while a throttled background tab kept beating, or
+// a join that never landed) recreates the entry and publishes the comeback
+// snapshot, while a heartbeat for a live entry only refreshes lastSeen and
+// publishes nothing.
+func TestHeartbeatRejoinsAbsentEntry(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(5000, 0)}
+	pub := &capturePublisher{}
+	e := NewEngine(pub, Config{Now: clock.Now, TTL: 45 * time.Second})
+
+	// Absent id: the heartbeat acts as a join.
+	if err := e.Heartbeat("user-1", "prodigal"); err != nil {
+		t.Fatalf("heartbeat on absent id: %v", err)
+	}
+	u, ok := findUser(e.Snapshot(), "user-1")
+	if !ok || u.Name != "prodigal" || u.Display != "prodigal" {
+		t.Fatalf("after heartbeat entry %+v (found %v), want prodigal online", u, ok)
+	}
+	publishes := pub.publishes()
+	if n := len(publishes); n != 1 {
+		t.Fatalf("rejoin heartbeat published %d snapshots, want 1", n)
+	}
+	if len(publishes[0].online) != 1 || publishes[0].online[0].ID != "user-1" {
+		t.Fatalf("rejoin snapshot %+v does not contain the caller", publishes[0].online)
+	}
+
+	// Live entry: the heartbeat refreshes lastSeen and stays publish-silent.
+	clock.Advance(30 * time.Second)
+	if err := e.Heartbeat("user-1", "prodigal"); err != nil {
+		t.Fatalf("refresh heartbeat: %v", err)
+	}
+	if n := len(pub.publishes()); n != 1 {
+		t.Fatalf("refresh heartbeat published again (%d total), want no new snapshot", n)
+	}
+	// 40s past the refresh (70s past the rejoin) the refreshed entry survives
+	// a sweep — and the quiescent sweep adds no publish of its own.
+	clock.Advance(40 * time.Second)
+	e.sweepOnce()
+	if u, ok := findUser(e.Snapshot(), "user-1"); !ok {
+		t.Fatal("refresh heartbeat did not keep the entry alive across a sweep")
+	} else if u.Display != "prodigal" {
+		t.Fatalf("entry display %q changed across a sweep", u.Display)
+	}
+	if n := len(pub.publishes()); n != 1 {
+		t.Fatalf("sweep after a refresh published again (%d total), want no new snapshot", n)
 	}
 }
 
@@ -253,6 +325,46 @@ func TestSweepKeepsFreshEntries(t *testing.T) {
 	}
 	if n := len(pub.publishes()); n != 1 {
 		t.Fatalf("sweep published %d extra snapshots, want none", n-1)
+	}
+}
+
+// TestSweepRepublishesAfterFailedPublish pins the retry: when the sweep that
+// dropped a ghost fails to publish, later quiescent sweeps republish the
+// healed snapshot until one succeeds — and stop once it has, so a healthy
+// room is not respammed every tick.
+func TestSweepRepublishesAfterFailedPublish(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(6000, 0)}
+	pub := &scriptedPublisher{failAt: map[int]bool{2: true}} // the removal publish fails
+	e := NewEngine(pub, Config{Now: clock.Now, TTL: 45 * time.Second})
+
+	if _, err := e.Join("user-1", "ghost"); err != nil {
+		t.Fatalf("join: %v", err)
+	}
+
+	// The dropping sweep owes a publish; the relay outage swallows it.
+	clock.Advance(46 * time.Second)
+	e.sweepOnce()
+	if got := len(e.Snapshot().Online); got != 0 {
+		t.Fatalf("%d online after sweep, want the ghost dropped", got)
+	}
+	if n := len(pub.publishes()); n != 1 {
+		t.Fatalf("%d successful publishes after the failed sweep, want only the join's", n)
+	}
+
+	// Quiescent sweep, relay back up: the owed snapshot goes out.
+	e.sweepOnce()
+	publishes := pub.publishes()
+	if n := len(publishes); n != 2 {
+		t.Fatalf("%d successful publishes after retry, want 2 (join + retried sweep)", n)
+	}
+	if len(publishes[1].online) != 0 {
+		t.Fatalf("retried snapshot %+v, want it empty", publishes[1].online)
+	}
+
+	// Debt paid: further quiescent sweeps publish nothing.
+	e.sweepOnce()
+	if n := len(pub.publishes()); n != 2 {
+		t.Fatalf("sweep kept republishing (%d publishes), want it to stop after success", n)
 	}
 }
 
@@ -509,6 +621,33 @@ func TestHandlersServeBeaconShapedRequests(t *testing.T) {
 	}
 }
 
+// TestHeartbeatOverHTTPRejoinsWithSessionName: behind RequireAuth, a
+// heartbeat with no prior join recreates the caller's entry using the
+// username from the session — the empty beacon-shaped body carries no
+// identity — and publishes the comeback snapshot on the room topic.
+func TestHeartbeatOverHTTPRejoinsWithSessionName(t *testing.T) {
+	pub := &capturePublisher{}
+	e := NewEngine(pub, Config{})
+	fx := newFixture(t, e, pub)
+	id, token := session(t, fx, "wanderer")
+
+	status, body := postPath(t, fx.ts, "/api/presence/heartbeat", token, "")
+	if status != http.StatusOK {
+		t.Fatalf("heartbeat status %d (%s), want 200", status, body)
+	}
+	u, ok := findUser(e.Snapshot(), id)
+	if !ok || u.Name != "wanderer" || u.Display != "wanderer" {
+		t.Fatalf("after heartbeat entry %+v (found %v), want the session's username", u, ok)
+	}
+	publishes := pub.publishes()
+	if n := len(publishes); n != 1 {
+		t.Fatalf("heartbeat published %d snapshots, want 1", n)
+	}
+	if len(publishes[0].online) != 1 || publishes[0].online[0].ID != id {
+		t.Fatalf("heartbeat snapshot %+v does not contain exactly the caller", publishes[0].online)
+	}
+}
+
 // TestJoinPublishFailureAnswers502 pins the degraded-broadcast policy: the
 // entry is recorded (the state change stands, and the next snapshot heals
 // the room) but the reply reports the failed broadcast with 502, matching
@@ -538,6 +677,16 @@ func TestJoinPublishFailureAnswers502(t *testing.T) {
 	}
 	if got := len(e.Snapshot().Online); got != 0 {
 		t.Fatalf("leave did not remove the caller despite the publish failure")
+	}
+
+	// Heartbeat with the relay still down doubles as a rejoin: the entry is
+	// recreated under the session's name, and the failed broadcast 502s.
+	status, _ = postPath(t, fx.ts, "/api/presence/heartbeat", token, "")
+	if status != http.StatusBadGateway {
+		t.Fatalf("heartbeat status %d, want 502", status)
+	}
+	if u, ok := findUser(e.Snapshot(), id); !ok || u.Display != "unlucky" {
+		t.Fatalf("heartbeat entry %+v (found %v) after 502, want unlucky re-added", u, ok)
 	}
 }
 
@@ -621,7 +770,7 @@ func TestConcurrentJoinHeartbeatSweep(t *testing.T) {
 			for i := 0; i < iterations; i++ {
 				id := fmt.Sprintf("user-%d", (w+i)%6)
 				_, _ = e.Join(id, "racer")
-				e.Heartbeat(id)
+				_ = e.Heartbeat(id, "racer")
 				_ = e.Snapshot()
 				if i%3 == 0 {
 					e.sweepOnce()

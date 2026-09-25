@@ -219,7 +219,10 @@ function sendHeartbeat() {
 setInterval(sendHeartbeat, 15000);
 
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') sendHeartbeat();
+  // Re-join rather than plain-heartbeat when the tab becomes visible: a join
+  // also resurrects the entry if it expired while hidden, and repaints the
+  // online list from the reply.
+  if (document.visibilityState === 'visible') joinPresence();
 });
 
 // Leaving: navigator.sendBeacon issues a plain same-origin POST with the
@@ -298,17 +301,45 @@ let dmPaneSeen = new Set();
 async function loadMe() {
   try {
     const res = await fetch('/api/me');
-    if (!res.ok) return;
+    if (!res.ok) return false;
     const user = await res.json();
-    if (!user || !user.id || !user.dm_topic) return;
+    if (!user || !user.id || !user.dm_topic) return false;
     me = user;
     openDMStream(me.dm_topic);
     if (lastSnapshot) renderOnline(lastSnapshot); // mark "(you)" retroactively
+    return true;
   } catch (err) {
-    // Session or network trouble; the room keeps working without DMs.
+    // Session or network trouble; the retry loop below decides when to give up.
+    return false;
   }
 }
-loadMe();
+
+// loadMeWithRetries retries /api/me with capped backoff: one failed fetch at
+// page load must not permanently disable receiving DMs — nothing else ever
+// opens the dm stream. Success stops the loop; after the final attempt the
+// DM pane shows a non-fatal notice (the room keeps working; a reload retries
+// from scratch).
+async function loadMeWithRetries() {
+  const delays = [1000, 2000, 4000, 8000, 16000];
+  for (let attempt = 0; attempt <= delays.length; attempt++) {
+    if (await loadMe()) return;
+    if (attempt < delays.length) {
+      await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+    }
+  }
+  showDMNotice('direct messages unavailable - reload to retry');
+}
+
+// showDMNotice swaps the DM pane's placeholder for a persistent notice row
+// (textContent only). The pane cannot be opened without /api/me, so the row
+// stays until reload.
+function showDMNotice(text) {
+  const row = document.createElement('li');
+  row.className = 'empty';
+  row.textContent = text;
+  dmMessages.replaceChildren(row);
+}
+loadMeWithRetries();
 
 // openDMStream subscribes to the caller's private topic. The dm stream is
 // separate from the room stream, so a DM never renders in the room and a
@@ -317,9 +348,12 @@ function openDMStream(topic) {
   const stream = new EventSource('/events?topic=' + encodeURIComponent(topic));
 
   stream.addEventListener('connected', () => {
-    // Heal whatever the missed deliveries were: refetch the open
-    // conversation's history, merged in by message id.
-    if (openPeer) loadConversation(openPeer);
+    // Heal whatever the missed deliveries were: refetch every known
+    // conversation's history — the open one merges into the pane, the rest
+    // fold into their conversation state with unread bumps. A first-ever DM
+    // from a peer with no conversation yet cannot be discovered by these
+    // refetches; it still needs the live event.
+    for (const peer of conversations.keys()) loadConversation(peer);
   });
 
   stream.addEventListener('message', (ev) => { routeDM(parseEventData(ev)); });
@@ -441,17 +475,34 @@ async function openConversation(peer) {
   dmInput.focus();
 }
 
-// loadConversation fetches the pair's history into the pane. It runs on open
-// and on every dm-stream (re)connect, so a stream that was down heals by
-// refetch — the same backfill idea the room uses.
+// loadConversation fetches the pair's history. For the open conversation it
+// merges rows into the pane; for any other conversation it folds each
+// message into that conversation's routed/lastId/unread state — the same
+// bookkeeping routeDM does — without rendering, since the pane rebuilds from
+// history when the conversation is opened. It runs on open and on every
+// dm-stream (re)connect, so a stream that was down heals by refetch — the
+// same backfill idea the room uses.
 async function loadConversation(peer) {
-  if (peer !== openPeer) return;
   try {
     const res = await fetch('/api/dm?with=' + encodeURIComponent(peer));
-    if (!res.ok || peer !== openPeer) return;
+    if (!res.ok) return;
     const messages = await res.json();
     if (!Array.isArray(messages)) return;
-    for (const msg of messages) mergeDM(msg);
+    if (peer === openPeer) {
+      for (const msg of messages) mergeDM(msg);
+      return;
+    }
+    const conv = conversations.get(peer);
+    if (!conv) return;
+    let changed = false;
+    for (const msg of messages) {
+      if (!msg || !Number.isInteger(msg.id) || conv.routed.has(msg.id)) continue;
+      conv.routed.add(msg.id);
+      conv.lastId = msg.id;
+      if (me && msg.author_id !== me.id) conv.unread += 1;
+      changed = true;
+    }
+    if (changed) renderConversationList();
   } catch (err) {
     // Offline mid-reconnect; the next connected event retries.
   }
@@ -498,6 +549,11 @@ dmInput.addEventListener('keydown', (event) => {
 // ---- logout ----
 
 logoutButton.addEventListener('click', async () => {
+  // Leave first, while the session cookie still validates the beacon: the
+  // /api/logout call below clears it, and the pagehide beacon fired after
+  // navigation would 401 and leave the user "online" until the server's TTL
+  // reaps the entry.
+  leavePresence();
   try {
     await fetch('/api/logout', { method: 'POST' });
   } catch (err) {

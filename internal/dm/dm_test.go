@@ -359,6 +359,47 @@ func TestSendToOfflineUser(t *testing.T) {
 	}
 }
 
+// TestSendToSelfRejected: a DM addressed to the caller's own id answers 400
+// even though the caller is online — the UI never offers self-DMs, and
+// honoring one would create a dead dm:<id>:<id> conversation and publish
+// twice to the sender's own topic. Nothing may be persisted or published.
+func TestSendToSelfRejected(t *testing.T) {
+	fx := newFixture(t, nil)
+	bob, bobToken := session(t, fx, "bob")
+	fx.presence.online[bob.ID] = true
+
+	stream := subscribe(t, fx.ts, store.DMTopic(bob.DMSecret))
+	if event, _ := stream.next(t); event != "connected" {
+		t.Fatalf("first event %q, want connected", event)
+	}
+
+	status, _, errMsg := sendDM(t, fx.ts, bobToken, bob.ID, "note to self")
+	if status != http.StatusBadRequest {
+		t.Fatalf("self-DM status %d, want 400", status)
+	}
+	if !strings.Contains(errMsg, "yourself") {
+		t.Fatalf("error %q does not explain the self-DM rejection", errMsg)
+	}
+
+	// No row persisted under the would-be dm:<bob>:<bob> scope.
+	rows, err := fx.store.RecentMessages(context.Background(), conversationScope(bob.ID, bob.ID), 0, historyLimit)
+	if err != nil {
+		t.Fatalf("load self-scope rows: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("self-DM persisted %+v; the send must not reach the store", rows)
+	}
+
+	// Nothing published: the sentinel published strictly after the rejected
+	// send must be the first event on bob's own dm topic.
+	if err := fx.push.PublishJSON(store.DMTopic(bob.DMSecret), "sentinel", map[string]string{"k": "bob"}); err != nil {
+		t.Fatalf("publish sentinel: %v", err)
+	}
+	if event, _ := stream.next(t); event != "sentinel" {
+		t.Fatalf("bob's dm stream saw %q before the sentinel; the self-DM was published", event)
+	}
+}
+
 // TestSendStampsAuthorScopeAndReply checks the 201 reply shape: the server
 // stamps the author identity and time, and derives the conversation scope
 // dm:<min(idA,idB)>:<max(idA,idB)> regardless of who sends.
