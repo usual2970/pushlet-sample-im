@@ -245,6 +245,7 @@ type credentials struct {
 // with padded whitespace registers under its trimmed form). On failure it has
 // already written the 400 response and reports false.
 func decodeCredentials(w http.ResponseWriter, r *http.Request) (credentials, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
 	var creds credentials
 	dec := json.NewDecoder(r.Body)
 	if err := dec.Decode(&creds); err != nil {
@@ -259,6 +260,12 @@ func decodeCredentials(w http.ResponseWriter, r *http.Request) (credentials, boo
 // algorithm ignores bytes past 72, so anything longer is rejected outright
 // rather than silently truncated.
 const maxPasswordBytes = 72
+
+// maxRequestBytes caps the whole credentials body the way the chat and dm
+// endpoints cap theirs: far above anything the field rules admit (32 + 72
+// bytes plus JSON overhead), so oversized payloads fail fast instead of
+// being buffered whole.
+const maxRequestBytes = 16 << 10
 
 // validateCredentials enforces the registration rules R1/R2 on a decoded
 // request: the username is trimmed and must be 1-32 characters of

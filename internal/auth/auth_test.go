@@ -550,6 +550,33 @@ func TestMalformedBodyRejected(t *testing.T) {
 	}
 }
 
+// TestOversizedBodyRejected pins the request-size cap the chat and dm
+// endpoints already enforce: a credentials body over maxRequestBytes is cut
+// off by the reader and answered with the same 400 as any other undecodable
+// body, before the field rules ever run.
+func TestOversizedBodyRejected(t *testing.T) {
+	_, ts := newTestService(t)
+
+	payload := `{"username":"alice","password":"` + strings.Repeat("x", maxRequestBytes) + `"}`
+	for _, path := range []string{"/api/register", "/api/login"} {
+		resp, err := http.Post(ts.URL+path, "application/json", strings.NewReader(payload))
+		if err != nil {
+			t.Fatalf("post %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("post %s oversized body: status %d, want 400", path, resp.StatusCode)
+		}
+		var body map[string]string
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatalf("decode %s error body: %v", path, err)
+		}
+		if !strings.Contains(body["error"], "invalid request body") {
+			t.Fatalf("error %q does not contain %q", body["error"], "invalid request body")
+		}
+	}
+}
+
 // TestConcurrentSamePairRegistrationExactlyOneSucceeds drives the pair rule
 // through the HTTP surface: N parallel registrations of one (username,
 // password) pair yield exactly one success.

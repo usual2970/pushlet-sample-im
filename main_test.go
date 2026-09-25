@@ -48,6 +48,37 @@ func newTestApp(t *testing.T) (*App, *httptest.Server) {
 	return app, ts
 }
 
+// TestConfigFromEnv pins the environment surface: the defaults listen on
+// :8080 with both SQLite files under data/, and SAMPLE_IM_ADDR /
+// SAMPLE_IM_DATA_DIR override their pieces — the data directory placing the
+// relay and application databases side by side under one root.
+func TestConfigFromEnv(t *testing.T) {
+	cfg := configFromEnv()
+	if cfg.Addr != defaultAddr {
+		t.Fatalf("default addr %q, want %q", cfg.Addr, defaultAddr)
+	}
+	if want := filepath.Join(defaultDataDir, "relay.db"); cfg.DBPath != want {
+		t.Fatalf("default relay db path %q, want %q", cfg.DBPath, want)
+	}
+	if want := filepath.Join(defaultDataDir, "app.db"); cfg.AppDBPath != want {
+		t.Fatalf("default app db path %q, want %q", cfg.AppDBPath, want)
+	}
+
+	dir := filepath.Join(t.TempDir(), "state")
+	t.Setenv("SAMPLE_IM_ADDR", "127.0.0.1:9999")
+	t.Setenv("SAMPLE_IM_DATA_DIR", dir)
+	cfg = configFromEnv()
+	if cfg.Addr != "127.0.0.1:9999" {
+		t.Fatalf("SAMPLE_IM_ADDR ignored: addr %q", cfg.Addr)
+	}
+	if cfg.DBPath != filepath.Join(dir, "relay.db") {
+		t.Fatalf("relay db path %q, want it under %s", cfg.DBPath, dir)
+	}
+	if cfg.AppDBPath != filepath.Join(dir, "app.db") {
+		t.Fatalf("app db path %q, want it under %s", cfg.AppDBPath, dir)
+	}
+}
+
 func TestHealthRoute(t *testing.T) {
 	_, ts := newTestApp(t)
 

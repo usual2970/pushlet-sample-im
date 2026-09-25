@@ -555,29 +555,35 @@ func TestSweeperGoroutineExpiresAndStops(t *testing.T) {
 		t.Fatalf("join: %v", err)
 	}
 
+	// Nobody leaves in this test, so an empty snapshot can only come from the
+	// sweeper. Poll for that empty *publish* rather than for the empty map:
+	// sweepOnce deletes the entry under the engine lock but records its
+	// publish only after unlocking, so the map can read empty a moment
+	// before the publish lands — a window this test used to race.
 	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if len(e.Snapshot().Online) == 0 {
-			break
-		}
+	for !anyEmptySnapshot(pub.publishes()) {
 		if time.Now().After(deadline) {
 			t.Fatal("sweeper goroutine did not expire the silent joiner within 2s")
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-
-	empty := false
-	for _, p := range pub.publishes() {
-		if len(p.online) == 0 {
-			empty = true
-		}
-	}
-	if !empty {
-		t.Fatal("expiry by the sweeper goroutine never published an empty snapshot")
+	if got := len(e.Snapshot().Online); got != 0 {
+		t.Fatalf("%d online after the sweeper's empty snapshot, want 0", got)
 	}
 
 	e.Stop()                        // second Stop must be a safe no-op
 	NewEngine(pub, Config{}).Stop() // Stop before any Start must not hang
+}
+
+// anyEmptySnapshot reports whether any recorded publish carried an empty
+// online list.
+func anyEmptySnapshot(publishes []capturedPublish) bool {
+	for _, p := range publishes {
+		if len(p.online) == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // TestConcurrentJoinHeartbeatSweep hammers one engine from many goroutines

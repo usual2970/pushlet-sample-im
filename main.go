@@ -41,8 +41,7 @@ import (
 // 9090/9091 pair used by the pushlet examples.
 const (
 	defaultAddr         = ":8080"
-	defaultDBPath       = "data/relay.db"
-	defaultAppDBPath    = "data/app.db"
+	defaultDataDir      = "data"
 	defaultShutdownWait = 5 * time.Second
 )
 
@@ -80,12 +79,17 @@ type Config struct {
 	PollInterval time.Duration
 }
 
-// configFromEnv reads runtime configuration from the environment.
+// configFromEnv reads runtime configuration from the environment. The data
+// directory is the single knob for both SQLite files: the novaque relay
+// database and the application database live side by side under it, so
+// pointing SAMPLE_IM_DATA_DIR at a fresh directory is all a second demo
+// instance needs.
 func configFromEnv() Config {
+	dataDir := envOr("SAMPLE_IM_DATA_DIR", defaultDataDir)
 	return Config{
 		Addr:      envOr("SAMPLE_IM_ADDR", defaultAddr),
-		DBPath:    defaultDBPath,
-		AppDBPath: defaultAppDBPath,
+		DBPath:    filepath.Join(dataDir, "relay.db"),
+		AppDBPath: filepath.Join(dataDir, "app.db"),
 	}
 }
 
@@ -120,10 +124,10 @@ type App struct {
 // schema, so a broken database fails here rather than at first publish.
 func NewApp(cfg Config) (*App, error) {
 	if cfg.DBPath == "" {
-		cfg.DBPath = defaultDBPath
+		cfg.DBPath = filepath.Join(defaultDataDir, "relay.db")
 	}
 	if cfg.AppDBPath == "" {
-		cfg.AppDBPath = defaultAppDBPath
+		cfg.AppDBPath = filepath.Join(defaultDataDir, "app.db")
 	}
 
 	db, err := openRelayDB(cfg.DBPath)
