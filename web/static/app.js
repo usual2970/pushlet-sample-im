@@ -6,6 +6,9 @@
 // keyed on server message ids, posts room messages to /api/messages and DMs
 // to /api/dm, and tracks the caller's presence (join on every (re)connect,
 // heartbeats, a leave beacon on unload).
+// The room chat and the DM pane are exclusive views behind the header tab
+// bar; both streams stay connected on either tab, and the inactive view
+// accumulates unread markers (a dot on 聊天室, a summed count on 私聊).
 // Security rule (KTD12): every piece of dynamic text is set through
 // textContent — user content never touches innerHTML.
 
@@ -25,8 +28,61 @@ const dmSend = document.getElementById('dm-send');
 const dmError = document.getElementById('dm-error');
 const dmList = document.getElementById('dm-list');
 
+const tabRoom = document.getElementById('tab-room');
+const tabDM = document.getElementById('tab-dm');
+const roomUnreadDot = document.getElementById('room-unread');
+const dmUnreadBadge = document.getElementById('dm-unread');
+const viewRoom = document.getElementById('view-room');
+const viewDM = document.getElementById('view-dm');
+
 let lastSeenId = 0;         // highest server message id rendered
 const seenIds = new Set();  // every server message id rendered
+
+// ---- views (tabs) ----
+
+// Exactly one of the two views is visible at a time; the tab bar switches
+// them. The state is page-lifetime only and starts on 聊天室. Switching tabs
+// never touches the streams: the hidden view keeps merging messages, with
+// unread markers carrying the "something new arrived" signal.
+
+let activeTab = 'room'; // 'room' | 'dm'
+let roomUnread = 0;     // room messages that arrived while the room view was hidden
+
+// pendingBottom holds message lists written to while their view was hidden:
+// a display:none list reports scrollHeight/clientHeight of 0, so the
+// stick-to-bottom scroll cannot land then and is deferred until the view is
+// laid out again.
+const pendingBottom = new Set();
+
+// setRoomUnread shows or hides the 聊天室 tab's unread dot.
+function setRoomUnread(count) {
+  roomUnread = count;
+  roomUnreadDot.hidden = count <= 0;
+}
+
+// switchTab activates one view and idles the other. Activating 聊天室 clears
+// its unread dot (the messages are on screen now) and lands any autoscroll
+// deferred while the list was hidden; the same landing covers the DM list on
+// the way back to 私聊.
+function switchTab(tab) {
+  activeTab = tab;
+  const roomActive = tab === 'room';
+  tabRoom.classList.toggle('active', roomActive);
+  tabRoom.setAttribute('aria-selected', String(roomActive));
+  viewRoom.classList.toggle('active', roomActive);
+  tabDM.classList.toggle('active', !roomActive);
+  tabDM.setAttribute('aria-selected', String(!roomActive));
+  viewDM.classList.toggle('active', !roomActive);
+  if (roomActive) setRoomUnread(0);
+  const list = roomActive ? messagesList : dmMessages;
+  if (pendingBottom.has(list)) {
+    pendingBottom.delete(list);
+    list.scrollTop = list.scrollHeight;
+  }
+}
+
+tabRoom.addEventListener('click', () => switchTab('room'));
+tabDM.addEventListener('click', () => switchTab('dm'));
 
 // ---- rendering ----
 
@@ -69,8 +125,9 @@ function nearBottom(list) {
 // in id order: drop any .empty placeholder, remember whether the list was
 // scrolled near the bottom, place the row before the first sibling carrying a
 // higher id (append when there is none), track the id in seen, and autoscroll
-// when the list was stuck to the bottom. isOwn flags the caller's own
-// messages for right alignment.
+// when the list was stuck to the bottom — deferred through pendingBottom when
+// the list's view is hidden, since a display:none list has no scroll metrics.
+// isOwn flags the caller's own messages for right alignment.
 function mergeInto(list, seen, msg, isOwn) {
   if (!msg || !Number.isInteger(msg.id) || seen.has(msg.id)) return;
 
@@ -92,16 +149,25 @@ function mergeInto(list, seen, msg, isOwn) {
   if (!placed) list.appendChild(row);
 
   seen.add(msg.id);
-  if (stick) list.scrollTop = list.scrollHeight;
+  if (stick) {
+    if (list.clientHeight === 0) {
+      pendingBottom.add(list);
+    } else {
+      list.scrollTop = list.scrollHeight;
+    }
+  }
 }
 
 // mergeMessage renders msg unless its id is already on the page, inserting it
 // in id order. Keying on the server id is what keeps stream delivery and a
 // backfill response that was in flight at the same time from double-rendering
-// the same message.
+// the same message. A new message that lands while the room view is hidden
+// also bumps the 聊天室 tab's unread dot.
 function mergeMessage(msg) {
+  if (!msg || !Number.isInteger(msg.id)) return;
+  if (!seenIds.has(msg.id) && activeTab !== 'room') setRoomUnread(roomUnread + 1);
   mergeInto(messagesList, seenIds, msg, false);
-  if (msg && Number.isInteger(msg.id) && msg.id > lastSeenId) lastSeenId = msg.id;
+  if (msg.id > lastSeenId) lastSeenId = msg.id;
 }
 
 // ---- seed from the server-rendered history ----
@@ -169,8 +235,8 @@ async function backfill() {
 // reply and every "presence" stream event both carry the full list, so a
 // plain replace converges. Display names (already disambiguated server-side
 // as name#xxxx for duplicate usernames) are user content: textContent only.
-// Clicking another user opens (or creates) a DM conversation with them; your
-// own entry is inert — no self-DMs.
+// Clicking another user switches to the 私聊 view and opens (or creates) a
+// DM conversation with them; your own entry is inert — no self-DMs.
 let lastSnapshot = null;
 
 function renderOnline(snapshot) {
@@ -418,8 +484,10 @@ async function lookupName(peer) {
   }
 }
 
-// renderConversationList rebuilds the sidebar rows: most recent conversation
-// first, the open one highlighted, unread counts as badges.
+// renderConversationList rebuilds the 私聊 view's conversation rows: most
+// recent conversation first, the open one highlighted, unread counts as
+// badges. It also refreshes the 私聊 tab's aggregate badge, since every
+// change to per-conversation unread flows through here.
 function renderConversationList() {
   const peers = [...conversations.keys()];
   peers.sort((a, b) => (conversations.get(b).lastId || 0) - (conversations.get(a).lastId || 0));
@@ -446,6 +514,17 @@ function renderConversationList() {
     rows.push(row);
   }
   dmList.replaceChildren(...rows);
+  renderDMTabBadge();
+}
+
+// renderDMTabBadge sums every conversation's unread onto the 私聊 tab. The
+// badge can stay up while the 私聊 view itself is active: per-conversation
+// unread clears only when that conversation is opened, not when the tab is.
+function renderDMTabBadge() {
+  let total = 0;
+  for (const conv of conversations.values()) total += conv.unread;
+  dmUnreadBadge.hidden = total <= 0;
+  dmUnreadBadge.textContent = total > 99 ? '99+' : String(total);
 }
 
 // mergeDM renders msg in the open conversation's pane unless its id is
@@ -458,9 +537,12 @@ function mergeDM(msg) {
 // openConversation switches the DM pane to one correspondent: clears unread,
 // resets the pane's seen set, and loads the pair's history through the same
 // merge path live events use. Clicking an online user and clicking a row
-// both land here, so rows are created on demand.
+// both land here, so rows are created on demand — and both must land on the
+// 私聊 view, which the leading switchTab guarantees whichever tab the click
+// came from.
 async function openConversation(peer) {
   if (!me || peer === me.id) return; // no self-DMs
+  switchTab('dm');
   openPeer = peer;
   const conv = ensureConversation(peer);
   conv.unread = 0;
@@ -471,6 +553,7 @@ async function openConversation(peer) {
   dmSend.disabled = false;
 
   dmPaneSeen = new Set();
+  pendingBottom.delete(dmMessages); // the pane resets its scroll below
   dmMessages.replaceChildren();
   const emptyRow = document.createElement('li');
   emptyRow.className = 'empty';

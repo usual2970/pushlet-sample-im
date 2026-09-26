@@ -98,11 +98,51 @@ body.chat {
 .user-box { display: flex; align-items: center; gap: 0.75rem; }
 #me { font-weight: 600; }
 
+/* Tab bar: the 聊天室/私聊 switcher between the header and the views. The
+   active tab gets the accent color plus an inset underline that meets the
+   bar's bottom border. */
+.tabs {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0 1rem;
+  background: #ffffff;
+  border-bottom: 1px solid #e2e4e8;
+}
+.tabs .tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.5rem 0.9rem;
+  background: none;
+  border-radius: 6px 6px 0 0;
+  color: #5b6068;
+  font-weight: 600;
+}
+.tabs .tab:hover { background: #eef1f6; color: #1d1d1f; }
+.tabs .tab.active {
+  color: #2f6fed;
+  box-shadow: inset 0 -2px 0 #2f6fed;
+}
+.tab-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: #d23f31;
+}
+.tabs [hidden] { display: none; }
+
 .chat-layout {
   display: flex;
   flex: 1;
   min-height: 0;
 }
+
+/* The room and DM panes are exclusive views behind the tab bar: exactly one
+   carries .active. .view:not(.active) outspecifies both per-view display
+   rules, so the toggle always wins. */
+.view { flex: 1; min-width: 0; }
+.view:not(.active) { display: none; }
+.view-dm { display: flex; }
 
 .chat-main {
   display: flex;
@@ -121,7 +161,7 @@ body.chat {
   flex-direction: column;
   gap: 0.6rem;
 }
-.msg .meta { display: block; font-size: 0.78rem; color: #5b6068; }
+.msg .meta { display: flex; gap: 0.4rem; font-size: 0.78rem; color: #5b6068; }
 .msg .author { font-weight: 600; }
 .msg .body {
   display: block;
@@ -152,7 +192,8 @@ body.chat {
   border-left: 1px solid #e2e4e8;
   overflow-y: auto;
 }
-.online h2 {
+.online h2,
+.dm-list-pane h2 {
   margin: 0 0 0.75rem;
   font-size: 0.95rem;
   font-weight: 600;
@@ -160,9 +201,20 @@ body.chat {
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
-.online ul { margin: 0 0 1.25rem; padding: 0; list-style: none; }
+.online ul,
+.dm-list-pane ul { margin: 0 0 1.25rem; padding: 0; list-style: none; }
 
 /* ---- direct messages ---- */
+
+/* The 私聊 view's left region: the conversation list, relocated from the old
+   sidebar. The .dm pane's border-left separates it from this list. */
+.dm-list-pane {
+  width: 13rem;
+  flex: none;
+  padding: 1rem;
+  background: #ffffff;
+  overflow-y: auto;
+}
 
 .dm {
   display: flex;
@@ -236,11 +288,18 @@ body.chat {
   body.login #error { background: #3a2020; border-color: #5c2b2b; }
 
   #conn-banner { color: #ffd98a; background: #3a2f14; border-color: #5c4a1c; }
-  .chat-header, .composer, .online, .dm { background: #1f2229; border-color: #33363e; }
+  .chat-header, .tabs, .composer, .online, .dm, .dm-list-pane {
+    background: #1f2229;
+    border-color: #33363e;
+  }
   .dm-header { border-color: #33363e; }
   .room-name, .msg .meta, .empty { color: #9aa1ab; }
   .composer-error { color: #ff8f94; }
   .online .online-row:hover, .conv-row:hover { background: #2a2e37; }
   .conv-row.active { background: #2c3a5e; }
   .online .self { color: #9aa1ab; }
+
+  .tabs .tab { color: #9aa1ab; }
+  .tabs .tab:hover { background: #2a2e37; color: #e8eaed; }
+  .tabs .tab.active { color: #8ab4f8; box-shadow: inset 0 -2px 0 #8ab4f8; }
 }

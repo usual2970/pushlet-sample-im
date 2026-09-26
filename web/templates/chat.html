@@ -15,8 +15,20 @@
     <button id="logout" type="button">Log out</button>
   </div>
 </header>
+<!-- The room chat and direct messages are exclusive views behind this tab
+     bar; app.js starts on 聊天室 and toggles the .active class (plus
+     aria-selected) on both the tab and its view. Both SSE streams stay
+     connected on either tab; the inactive one collects unread markers:
+     a dot on 聊天室 for unseen room messages, a count on 私聊 summing every
+     conversation's unread. -->
+<div class="tabs" role="tablist" aria-label="Chat views">
+  <button id="tab-room" class="tab active" type="button" role="tab"
+          aria-selected="true" aria-controls="view-room">聊天室<span id="room-unread" class="tab-dot" hidden></span></button>
+  <button id="tab-dm" class="tab" type="button" role="tab"
+          aria-selected="false" aria-controls="view-dm">私聊<span id="dm-unread" class="badge" hidden></span></button>
+</div>
 <div class="chat-layout">
-  <main class="chat-main">
+  <main id="view-room" class="chat-main view active" aria-label="Room chat">
     <ol id="messages" class="messages" aria-live="polite">
       {{range .Messages}}<li class="msg" data-id="{{.ID}}"><span class="meta"><span class="author">{{.AuthorName}}</span> <time data-created-at="{{.CreatedAt}}"></time></span> <span class="body">{{.Body}}</span></li>
       {{else}}<li class="empty">No messages yet — say hello.</li>{{end}}
@@ -28,32 +40,39 @@
       <button id="send" type="submit">Send</button>
     </form>
   </main>
-  <section id="dm" class="dm" aria-label="Direct messages">
-    <header class="dm-header">
-      <h2 id="dm-title">Direct messages</h2>
-    </header>
-    <ol id="dm-messages" class="messages" aria-live="polite">
-      <li class="empty">Pick someone from the online list to chat privately.</li>
-    </ol>
-    <div id="dm-error" class="composer-error" hidden></div>
-    <form id="dm-composer" class="composer">
-      <textarea id="dm-input" rows="2" disabled
-                placeholder="Direct message — Enter to send, Shift+Enter for a new line"></textarea>
-      <button id="dm-send" type="submit" disabled>Send</button>
-    </form>
+  <section id="view-dm" class="view view-dm" aria-label="Direct messages">
+    <!-- The 私聊 view keeps the DM two-region layout the sidebar used to
+         host: the conversation list on the left, the open conversation on
+         the right. -->
+    <aside class="dm-list-pane" aria-label="Conversations">
+      <h2>Conversations</h2>
+      <!-- app.js fills this with one row per direct-message correspondent,
+           ordered by recency, with unread badges. Rows come from the private
+           dm stream and from clicking an online user. -->
+      <ul id="dm-list"></ul>
+    </aside>
+    <section id="dm" class="dm">
+      <header class="dm-header">
+        <h2 id="dm-title">Direct messages</h2>
+      </header>
+      <ol id="dm-messages" class="messages" aria-live="polite">
+        <li class="empty">Pick someone from the online list to chat privately.</li>
+      </ol>
+      <div id="dm-error" class="composer-error" hidden></div>
+      <form id="dm-composer" class="composer">
+        <textarea id="dm-input" rows="2" disabled
+                  placeholder="Direct message — Enter to send, Shift+Enter for a new line"></textarea>
+        <button id="dm-send" type="submit" disabled>Send</button>
+      </form>
+    </section>
   </section>
   <aside id="online" class="online" aria-label="Online users">
     <h2>Online</h2>
     <!-- app.js fills this from presence snapshots: the join reply and every
          "presence" stream event on the room topic. Clicking another user
-         opens (or creates) a direct-message conversation with them; your own
-         entry does nothing. -->
+         switches to the 私聊 view and opens (or creates) a direct-message
+         conversation with them; your own entry does nothing. -->
     <ul id="online-list"></ul>
-    <h2>Messages</h2>
-    <!-- app.js fills this with one row per direct-message correspondent,
-         ordered by recency, with unread badges. Rows come from the private
-         dm stream and from clicking an online user. -->
-    <ul id="dm-list"></ul>
   </aside>
 </div>
 <script src="/static/app.js"></script>
