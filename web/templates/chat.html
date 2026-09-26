@@ -30,7 +30,7 @@
 <div class="chat-layout">
   <main id="view-room" class="chat-main view active" aria-label="Room chat">
     <ol id="messages" class="messages" aria-live="polite">
-      {{range .Messages}}<li class="msg" data-id="{{.ID}}"><span class="meta"><span class="author">{{.AuthorName}}</span> <time data-created-at="{{.CreatedAt}}"></time></span> <span class="body">{{.Body}}</span></li>
+      {{range .Messages}}<li class="msg{{if eq .AuthorID $.MeID}} own{{end}}" data-id="{{.ID}}"><span class="meta"><span class="author">{{.AuthorName}}</span> <time data-created-at="{{.CreatedAt}}"></time></span> <span class="body">{{.Body}}</span></li>
       {{else}}<li class="empty">No messages yet — say hello.</li>{{end}}
     </ol>
     <div id="composer-error" class="composer-error" hidden></div>

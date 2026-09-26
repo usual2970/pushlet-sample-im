@@ -76,6 +76,7 @@ func NewService(st *store.Store, pub Publisher, tpl *template.Template) *Service
 // recent history rendered server-side.
 type chatPage struct {
 	Username string
+	MeID     string
 	Messages []Message
 }
 
@@ -97,6 +98,7 @@ func (s *Service) HandleChatPage(w http.ResponseWriter, r *http.Request) {
 	var buf bytes.Buffer
 	if err := s.tpl.ExecuteTemplate(&buf, chatTemplateName, chatPage{
 		Username: user.Username,
+		MeID:     user.ID,
 		Messages: toWire(rows),
 	}); err != nil {
 		http.Error(w, "could not render the chat page", http.StatusInternalServerError)

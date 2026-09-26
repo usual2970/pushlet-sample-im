@@ -166,7 +166,11 @@ function mergeInto(list, seen, msg, isOwn) {
 function mergeMessage(msg) {
   if (!msg || !Number.isInteger(msg.id)) return;
   if (!seenIds.has(msg.id) && activeTab !== 'room') setRoomUnread(roomUnread + 1);
-  mergeInto(messagesList, seenIds, msg, false);
+  // The caller's own room messages render right-aligned like DM own copies.
+  // me resolves async; a message landing before it does renders left once —
+  // acceptable, the seeded history already carries the server-side class.
+  const own = Boolean(me && msg.author_id === me.id);
+  mergeInto(messagesList, seenIds, msg, own);
   if (msg.id > lastSeenId) lastSeenId = msg.id;
 }
 
