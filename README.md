@@ -87,18 +87,18 @@ This is a demo, and the corners it cuts are part of the documentation:
 
 ## Deploy (Railway)
 
-The image builds from the **workspace root**, because `go.mod`'s `replace` needs the sibling `../pushlet` checkout (this also bakes in the WebSocket command-parser fix that upstream tags don't carry yet). `railway.json` at the workspace root already points Railway at `sample-im/Dockerfile`.
+Deploy **this repo alone**. `go.mod`'s `replace` points at the sibling `../pushlet` checkout, which a standalone clone doesn't have — so the Dockerfile's first stage fetches pushlet from GitHub at a pinned ref (`PUSHLET_REF` build arg, default `main`) and lays it out at that sibling path for the build. `railway.json` in this repo points Railway at the Dockerfile.
 
-1. Push `pushlet-workspace` (with the `sample-im` submodule registered and the `pushlet` submodule pointer at a commit that includes the WS guard) to GitHub.
-2. In Railway: **New Project → Deploy from GitHub repo → pushlet-workspace**. Under **Settings**, enable **Submodules** (Railway must clone the pushlet checkout the build copies in).
+1. Prerequisite: pushlet's GitHub `main` must include the WebSocket command-parser arity guard (the `fix/ws-command-guard` fix; released tags below it don't). Push that first, or pin another ref via a `PUSHLET_REF` service variable — Railway passes service variables to the Docker build as args.
+2. In Railway: **New Project → Deploy from GitHub repo → sample-im**. No submodule toggle needed.
 3. Add a **Volume** and mount it at `/data` — both SQLite files live there (`SAMPLE_IM_DATA_DIR` defaults to `/data` in the image). Without a volume, every redeploy wipes accounts, sessions, and history.
 4. Networking: generate a **domain** for the service. Railway injects `PORT`; the container binds it automatically. No other variables are required.
 
-Local image build (same Dockerfile, same context):
+Local image build (same Dockerfile):
 
 ```bash
-# from the pushlet-workspace root (NOT from inside sample-im/):
-docker build -f sample-im/Dockerfile -t sample-im .
+# from inside sample-im/:
+docker build -t sample-im .
 # restricted networks: add --build-arg GOPROXY=https://goproxy.cn,direct
 docker run --rm -p 8080:8080 -v "$PWD/data":/data sample-im
 ```

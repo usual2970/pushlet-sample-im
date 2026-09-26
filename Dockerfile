@@ -1,34 +1,46 @@
-# sample-im container image.
+# sample-im container image — standalone build (deploy repo = sample-im alone).
 #
-# Build context MUST be the pushlet-workspace root (not this directory):
 # sample-im's go.mod replaces github.com/usual2970/pushlet with the sibling
-# ../pushlet checkout, which the Docker build preserves as /src/pushlet.
+# ../pushlet checkout. A standalone clone of this repo has no sibling, so the
+# first stage fetches the pinned pushlet source and the build stage lays it
+# out at /src/pushlet next to /src/sample-im — the replace resolves inside
+# the image exactly like it does in the workspace.
 #
-#   docker build -f sample-im/Dockerfile -t sample-im .
+#   docker build -t sample-im .          (from inside sample-im/)
 #   docker run --rm -p 8080:8080 sample-im
 #
-# Railway: deploy the pushlet-workspace repo (submodules enabled); this
-# Dockerfile binds to $PORT and stores both SQLite databases under
-# SAMPLE_IM_DATA_DIR (default /data — mount a Railway Volume there).
+# Railway: deploy this repo; the container binds $PORT and stores both
+# SQLite databases under SAMPLE_IM_DATA_DIR (default /data — mount a
+# Railway Volume there).
+#
+# PUSHLET_REF is a build arg (Railway passes service variables as build
+# args). It MUST point at a pushlet revision that includes the WebSocket
+# command-parser arity guard — anything at or after the fix landing on main
+# (v0.0.20 tags do NOT have it).
+
+FROM golang:1.26-alpine AS pushlet
+ARG PUSHLET_REF=main
+RUN apk add --no-cache git
+WORKDIR /src
+RUN git clone --depth 1 --branch ${PUSHLET_REF} https://github.com/usual2970/pushlet pushlet
 
 FROM golang:1.26-alpine AS build
 # Module proxy is a build arg so restricted networks can override it:
 #   docker build --build-arg GOPROXY=https://goproxy.cn,direct ...
-# Railway's builders reach the default proxy directly.
 ARG GOPROXY=https://proxy.golang.org,direct
 ENV GOPROXY=${GOPROXY}
 WORKDIR /src
 
 # Manifests first so dependency downloads cache independently of source edits.
-COPY pushlet/go.mod pushlet/go.sum ./pushlet/
-COPY sample-im/go.mod sample-im/go.sum ./sample-im/
+COPY go.mod go.sum ./sample-im/
+COPY --from=pushlet /src/pushlet/go.mod /src/pushlet/go.sum ./pushlet/
 WORKDIR /src/sample-im
 RUN go mod download
 
-# Full sources; the replace directive resolves ../pushlet inside the image.
+# Full sources; ../pushlet resolves to the fetched checkout.
 WORKDIR /src
-COPY pushlet/ ./pushlet/
-COPY sample-im/ ./sample-im/
+COPY --from=pushlet /src/pushlet ./pushlet/
+COPY . ./sample-im/
 WORKDIR /src/sample-im
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/sample-im .
 
