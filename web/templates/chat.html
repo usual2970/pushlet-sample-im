@@ -3,7 +3,17 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>sample-im — #room</title>
+<title>sample-im — chat · a pushlet demo messenger</title>
+<meta name="description" content="sample-im chat — a demo messenger built on pushlet. Room chat and direct messages stream live to everyone online over SSE.">
+<link rel="canonical" href="https://pushlet-sample.ikit.fun/">
+<meta property="og:title" content="sample-im — chat · a pushlet demo messenger">
+<meta property="og:description" content="sample-im chat — a demo messenger built on pushlet. Room chat and direct messages stream live over SSE.">
+<meta property="og:url" content="https://pushlet-sample.ikit.fun/">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary">
+<meta name="theme-color" content="#2f6fed">
+<meta name="theme-color" content="#16181d" media="(prefers-color-scheme: dark)">
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body class="chat">
@@ -16,16 +26,21 @@
   </div>
 </header>
 <!-- The room chat and direct messages are exclusive views behind this tab
-     bar; app.js starts on 聊天室 and toggles the .active class (plus
+     bar; app.js starts on Room and toggles the .active class (plus
      aria-selected) on both the tab and its view. Both SSE streams stay
      connected on either tab; the inactive one collects unread markers:
-     a dot on 聊天室 for unseen room messages, a count on 私聊 summing every
+     a dot on Room for unseen room messages, a count on DMs summing every
      conversation's unread. -->
 <div class="tabs" role="tablist" aria-label="Chat views">
   <button id="tab-room" class="tab active" type="button" role="tab"
-          aria-selected="true" aria-controls="view-room">聊天室<span id="room-unread" class="tab-dot" hidden></span></button>
+          aria-selected="true" aria-controls="view-room">Room<span id="room-unread" class="tab-dot" hidden></span></button>
   <button id="tab-dm" class="tab" type="button" role="tab"
-          aria-selected="false" aria-controls="view-dm">私聊<span id="dm-unread" class="badge" hidden></span></button>
+          aria-selected="false" aria-controls="view-dm">DMs<span id="dm-unread" class="badge" hidden></span></button>
+  <!-- Mobile-only (under 720px, via style.css): turns the online sidebar
+       into an off-canvas drawer. The count badge mirrors the online list.
+       Hidden on desktop; not a real tab, hence no role=tab. -->
+  <button id="online-toggle" class="tab" type="button" aria-expanded="false"
+          aria-controls="online">Online<span id="online-count" class="badge" hidden></span></button>
 </div>
 <div class="chat-layout">
   <main id="view-room" class="chat-main view active" aria-label="Room chat">
@@ -41,7 +56,7 @@
     </form>
   </main>
   <section id="view-dm" class="view view-dm" aria-label="Direct messages">
-    <!-- The 私聊 view keeps the DM two-region layout the sidebar used to
+    <!-- The DMs view keeps the DM two-region layout the sidebar used to
          host: the conversation list on the left, the open conversation on
          the right. -->
     <aside class="dm-list-pane" aria-label="Conversations">
@@ -53,6 +68,9 @@
     </aside>
     <section id="dm" class="dm">
       <header class="dm-header">
+        <!-- Mobile-only (under 720px, via style.css): returns the DMs view
+             from the open conversation to the conversation list. -->
+        <button id="dm-back" type="button">← Chats</button>
         <h2 id="dm-title">Direct messages</h2>
       </header>
       <ol id="dm-messages" class="messages" aria-live="polite">
@@ -70,11 +88,14 @@
     <h2>Online</h2>
     <!-- app.js fills this from presence snapshots: the join reply and every
          "presence" stream event on the room topic. Clicking another user
-         switches to the 私聊 view and opens (or creates) a direct-message
+         switches to the DMs view and opens (or creates) a direct-message
          conversation with them; your own entry does nothing. -->
     <ul id="online-list"></ul>
   </aside>
 </div>
+<!-- Mobile-only (under 720px, via style.css): the dim layer behind the
+     online drawer; a tap closes it (app.js). -->
+<div id="drawer-backdrop" aria-hidden="true"></div>
 <script src="/static/app.js"></script>
 </body>
 </html>

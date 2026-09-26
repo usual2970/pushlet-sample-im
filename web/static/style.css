@@ -98,7 +98,7 @@ body.chat {
 .user-box { display: flex; align-items: center; gap: 0.75rem; }
 #me { font-weight: 600; }
 
-/* Tab bar: the 聊天室/私聊 switcher between the header and the views. The
+/* Tab bar: the Room/DMs switcher between the header and the views. The
    active tab gets the accent color plus an inset underline that meets the
    bar's bottom border. */
 .tabs {
@@ -208,6 +208,13 @@ body.chat {
   border-left: 1px solid #e2e4e8;
   overflow-y: auto;
 }
+
+/* Mobile-only chrome: the Online drawer toggle, the DM back button, and the
+   drawer's dim backdrop. Hidden at every width here; the max-width media
+   query at the end of the file reveals and positions them below 720px. */
+#online-toggle { display: none; }
+#dm-back { display: none; }
+#drawer-backdrop { display: none; }
 .online h2,
 .dm-list-pane h2 {
   margin: 0 0 0.75rem;
@@ -222,7 +229,7 @@ body.chat {
 
 /* ---- direct messages ---- */
 
-/* The 私聊 view's left region: the conversation list, relocated from the old
+/* The DMs view's left region: the conversation list, relocated from the old
    sidebar. The .dm pane's border-left separates it from this list. */
 .dm-list-pane {
   width: 13rem;
@@ -326,4 +333,103 @@ body.chat {
   .tabs .tab { color: #9aa1ab; }
   .tabs .tab:hover { background: #2a2e37; color: #e8eaed; }
   .tabs .tab.active { color: #8ab4f8; box-shadow: inset 0 -2px 0 #8ab4f8; }
+}
+
+/* ---- small screens ----
+   Everything below applies only up to 720px; the desktop rules above are
+   untouched. Deliberately a separate media feature from the
+   prefers-color-scheme block so the two axes compose: the dark rules keep
+   recoloring the same elements this block repositions. */
+
+@media (max-width: 720px) {
+  /* The chat column tracks the dynamic viewport so the composer stays
+     visible above the mobile address bar; the 100vh line is the fallback
+     for browsers without dvh. */
+  body.chat {
+    height: 100vh;
+    height: 100dvh;
+  }
+
+  /* Login card fits a narrow screen with breathing room. */
+  body.login main {
+    max-width: calc(100vw - 2rem);
+    padding: 1.25rem;
+  }
+
+  /* Touch targets: 44px minimum on every control and row. */
+  button,
+  .online .online-row,
+  .conv-row {
+    min-height: 44px;
+  }
+  .online .online-row {
+    display: flex;
+    align-items: center;
+  }
+  .composer textarea { min-height: 44px; }
+
+  /* Tabs share the bar equally; the Online toggle keeps its own width at the
+     right edge. */
+  .tabs { padding: 0 0.5rem; }
+  .tabs .tab {
+    flex: 1;
+    justify-content: center;
+  }
+  #online-toggle {
+    display: inline-flex;
+    flex: 0 0 auto;
+    margin-left: auto;
+  }
+
+  /* Bubbles may span more of the narrow column. */
+  .msg { max-width: 85%; }
+
+  /* The online sidebar becomes an off-canvas drawer sliding in from the
+     right — the side it sits on at desktop widths. The dim backdrop
+     shields the chat and closes the drawer on tap. */
+  #online {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(15rem, 82vw);
+    z-index: 30;
+    transform: translateX(100%);
+    transition: transform 0.2s ease;
+    box-shadow: -0.25rem 0 0.75rem rgba(0, 0, 0, 0.15);
+  }
+  body.drawer-open #online { transform: none; }
+  body.drawer-open #drawer-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    background: rgba(0, 0, 0, 0.4);
+  }
+
+  /* The DMs view stacks: the conversation list is the default, the open
+     conversation takes the full width while .conv-open is set (app.js adds
+     it in openConversation, #dm-back removes it). */
+  .view-dm:not(.conv-open) .dm { display: none; }
+  .view-dm:not(.conv-open) .dm-list-pane {
+    flex: 1;
+    width: auto;
+  }
+  .view-dm.conv-open .dm-list-pane { display: none; }
+  .view-dm.conv-open .dm { border-left: none; }
+
+  /* The DM header becomes a back row: ← Chats before the title, the title
+     still ellipsizing. */
+  .dm-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .dm-header h2 { flex: 1; min-width: 0; }
+  #dm-back {
+    display: inline-flex;
+    align-items: center;
+    flex: none;
+    font-size: 0.9rem;
+  }
 }

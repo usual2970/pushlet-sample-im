@@ -660,8 +660,9 @@ func TestStaticAssetsServed(t *testing.T) {
 	_, ts := newTestApp(t)
 
 	for path, want := range map[string]string{
-		"/static/app.js":    "EventSource", // the room stream subscription
-		"/static/style.css": "conn-banner", // the reconnect banner style
+		"/static/app.js":      "EventSource", // the room stream subscription
+		"/static/style.css":   "conn-banner", // the reconnect banner style
+		"/static/favicon.svg": "svg",         // the chat-bubble favicon
 	} {
 		resp, err := http.Get(ts.URL + path)
 		if err != nil {
