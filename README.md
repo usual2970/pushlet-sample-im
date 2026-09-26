@@ -85,6 +85,24 @@ This is a demo, and the corners it cuts are part of the documentation:
 | `SAMPLE_IM_ADDR` | `:8080` | HTTP listen address |
 | `SAMPLE_IM_DATA_DIR` | `data/` | Directory for both SQLite files: `relay.db` (the novaque relay pushlet fans out through) and `app.db` (accounts, sessions, messages). Created if missing; pointing it at a fresh directory is all an isolated second instance needs |
 
+## Deploy (Railway)
+
+The image builds from the **workspace root**, because `go.mod`'s `replace` needs the sibling `../pushlet` checkout (this also bakes in the WebSocket command-parser fix that upstream tags don't carry yet). `railway.json` at the workspace root already points Railway at `sample-im/Dockerfile`.
+
+1. Push `pushlet-workspace` (with the `sample-im` submodule registered and the `pushlet` submodule pointer at a commit that includes the WS guard) to GitHub.
+2. In Railway: **New Project → Deploy from GitHub repo → pushlet-workspace**. Under **Settings**, enable **Submodules** (Railway must clone the pushlet checkout the build copies in).
+3. Add a **Volume** and mount it at `/data` — both SQLite files live there (`SAMPLE_IM_DATA_DIR` defaults to `/data` in the image). Without a volume, every redeploy wipes accounts, sessions, and history.
+4. Networking: generate a **domain** for the service. Railway injects `PORT`; the container binds it automatically. No other variables are required.
+
+Local image build (same Dockerfile, same context):
+
+```bash
+# from the pushlet-workspace root (NOT from inside sample-im/):
+docker build -f sample-im/Dockerfile -t sample-im .
+# restricted networks: add --build-arg GOPROXY=https://goproxy.cn,direct
+docker run --rm -p 8080:8080 -v "$PWD/data":/data sample-im
+```
+
 ## Development
 
 ```bash
