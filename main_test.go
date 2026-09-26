@@ -103,13 +103,41 @@ func TestHealthRoute(t *testing.T) {
 func TestIndexRoute(t *testing.T) {
 	_, ts := newTestApp(t)
 
-	resp, err := http.Get(ts.URL + "/")
+	// Anonymous visitors are redirected to the login page, never shown an
+	// API map: the site root IS the chat page.
+	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	resp, err := noRedirect.Get(ts.URL + "/")
 	if err != nil {
 		t.Fatalf("get /: %v", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status %d, want 200", resp.StatusCode)
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("anonymous status %d, want 302", resp.StatusCode)
+	}
+	if loc := resp.Header.Get("Location"); loc != "/login" {
+		t.Fatalf("anonymous Location %q, want /login", loc)
+	}
+
+	// Signed in, the root serves the chat shell itself.
+	session, _ := registerViaAPI(t, ts, "indexuser", "indexpass")
+	authed, err := http.NewRequest(http.MethodGet, ts.URL+"/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authed.Header.Set("Cookie", auth.SessionCookieName+"="+session)
+	page, err := http.DefaultClient.Do(authed)
+	if err != nil {
+		t.Fatalf("authed get /: %v", err)
+	}
+	defer page.Body.Close()
+	if page.StatusCode != http.StatusOK {
+		t.Fatalf("authed status %d, want 200", page.StatusCode)
+	}
+	body, _ := io.ReadAll(page.Body)
+	if !strings.Contains(string(body), `id="messages"`) {
+		t.Fatalf("authed / did not render the chat shell")
 	}
 }
 

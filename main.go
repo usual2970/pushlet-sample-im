@@ -191,7 +191,9 @@ func (a *App) mountRoutes(staticRoot fs.FS) {
 	a.mux.HandleFunc("/login", a.authSrv.HandleLoginPage)
 	a.mux.Handle("/chat", a.authSrv.RequireAuth(http.HandlerFunc(a.chatSrv.HandleChatPage)))
 	a.mux.Handle("GET /static/", http.StripPrefix("/static/", staticHandler(staticRoot)))
-	a.mux.HandleFunc("/", handleIndex)
+	// The site root IS the chat page; unauthenticated visitors are
+	// redirected to /login by the auth middleware, same as /chat.
+	a.mux.Handle("/", a.authSrv.RequireAuth(http.HandlerFunc(a.chatSrv.HandleChatPage)))
 
 	// The /api/* subtree lives on its own mux where every route carries a
 	// method pattern: ServeMux then answers a request whose path matches a
@@ -345,30 +347,6 @@ func openRelayDB(path string) (*sql.DB, error) {
 func handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprintln(w, `{"status":"ok"}`)
-}
-
-// handleIndex answers with a short map of the service surface.
-func handleIndex(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	fmt.Fprintln(w, "sample-im — pushlet demo")
-	fmt.Fprintln(w, "  GET /health           liveness probe")
-	fmt.Fprintln(w, "  GET /events?topic=t   SSE stream for topic t")
-	fmt.Fprintln(w, "  GET /ws?topic=t       WebSocket stream for topic t")
-	fmt.Fprintln(w, "  GET /login            sign in or create an account")
-	fmt.Fprintln(w, "  GET /chat             the chat room page (session required)")
-	fmt.Fprintln(w, "  POST /api/register    create an account (JSON)")
-	fmt.Fprintln(w, "  POST /api/login       sign in (JSON)")
-	fmt.Fprintln(w, "  POST /api/logout      sign out")
-	fmt.Fprintln(w, "  GET /api/me           the signed-in user (JSON)")
-	fmt.Fprintln(w, "  POST /api/messages    send a room message (JSON, session required)")
-	fmt.Fprintln(w, "  GET /api/messages     recent room history (JSON, ?after=id)")
-	fmt.Fprintln(w, "  POST /api/presence/join     announce yourself, get the online list")
-	fmt.Fprintln(w, "  POST /api/presence/heartbeat  keep your online entry alive")
-	fmt.Fprintln(w, "  POST /api/presence/leave    leave the online list (sendBeacon-friendly)")
-	fmt.Fprintln(w, "  POST /api/dm          send a direct message (JSON, recipient must be online)")
-	fmt.Fprintln(w, "  GET /api/dm?with=id   your direct-message history with that user")
-	fmt.Fprintln(w, "  GET /api/users/<id>   a user's public name (for DM headers)")
-	fmt.Fprintln(w, "  GET /static/...       embedded client assets")
 }
 
 // redactedTopic replaces any dm: topic value in log output.
