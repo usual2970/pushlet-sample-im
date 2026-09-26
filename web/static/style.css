@@ -65,6 +65,14 @@ body.login #error {
   border-radius: 6px;
 }
 body.login .switch { margin: 1rem 0 0; font-size: 0.85rem; text-align: center; }
+body.login .built-on {
+  margin: 1.25rem 0 0;
+  font-size: 0.8rem;
+  text-align: center;
+  color: #5b6068;
+}
+body.login .built-on a { color: #2f6fed; text-decoration: none; }
+body.login .built-on a:hover { text-decoration: underline; }
 body.login form:not(.active) { display: none; }
 
 /* ---- chat page ---- */
@@ -95,6 +103,17 @@ body.chat {
 }
 .chat-header h1 { margin: 0; font-size: 1.1rem; }
 .room-name { font-weight: 400; color: #5b6068; }
+/* External link back to the library repo: muted like the room name, accent
+   on hover. */
+.pushlet-link {
+  margin-left: 0.4rem;
+  font-size: 0.85rem;
+  font-weight: 400;
+  color: #5b6068;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.pushlet-link:hover { color: #2f6fed; text-decoration: underline; }
 .user-box { display: flex; align-items: center; gap: 0.75rem; }
 #me { font-weight: 600; }
 
@@ -322,7 +341,7 @@ body.chat {
     border-color: #33363e;
   }
   .dm-header { border-color: #33363e; }
-  .room-name, .msg .meta, .empty { color: #9aa1ab; }
+  .room-name, .pushlet-link, .msg .meta, .empty, body.login .built-on { color: #9aa1ab; }
   .msg .body { background: #262a32; border-color: #33363e; }
   .msg.own .body { background: #2f6fed; border-color: #2f6fed; }
   .composer-error { color: #ff8f94; }
