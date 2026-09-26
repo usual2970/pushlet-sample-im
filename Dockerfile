@@ -45,12 +45,17 @@ WORKDIR /src/sample-im
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/sample-im .
 
 FROM alpine:3.20
-RUN adduser -D -H -u 10001 app && mkdir -p /data && chown -R app:app /data
-USER app
+# su-exec drops privileges after the entrypoint normalizes /data ownership
+# (Railway volumes mount root-owned; the app runs as the unprivileged user).
+RUN apk add --no-cache su-exec \
+  && adduser -D -H -u 10001 app \
+  && mkdir -p /data && chown -R app:app /data
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 ENV SAMPLE_IM_DATA_DIR=/data
 COPY --from=build /out/sample-im /usr/local/bin/sample-im
 EXPOSE 8080
 
-# Railway injects PORT; expand it in the shell so the binary binds correctly,
-# and exec so SIGTERM reaches the process for the graceful-shutdown ordering.
-CMD SAMPLE_IM_ADDR=":${PORT:-8080}" exec /usr/local/bin/sample-im
+# Starts as root only to chown the (possibly root-owned) volume mount, then
+# execs the server as the app user; PORT (injected by Railway) is honored.
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
