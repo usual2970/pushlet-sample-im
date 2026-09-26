@@ -262,6 +262,14 @@ composerForm.addEventListener('submit', async (event) => {
       body: JSON.stringify({ body: body }),
     });
     if (!res.ok) {
+      if (res.status === 502) {
+        // The row is persisted; only the live broadcast failed. Refetch
+        // renders it now instead of waiting for a reconnect, and the draft
+        // must go — resending would duplicate the saved message.
+        backfill();
+        composerInput.value = '';
+        composerInput.focus();
+      }
       let message = 'send failed (status ' + res.status + ')';
       try { message = (await res.json()).error || message; } catch (err) { /* non-JSON body */ }
       showError(message);
@@ -521,6 +529,14 @@ dmComposerForm.addEventListener('submit', async (event) => {
       body: JSON.stringify({ to: openPeer, body: body }),
     });
     if (!res.ok) {
+      if (res.status === 502) {
+        // The row is persisted; only the live broadcast failed. Refetch
+        // renders it now instead of waiting for a reconnect, and the draft
+        // must go — resending would duplicate the saved message.
+        loadConversation(openPeer);
+        dmInput.value = '';
+        dmInput.focus();
+      }
       let message = 'send failed (status ' + res.status + ')';
       if (res.status === 409) {
         message = 'user went offline — message not sent';
